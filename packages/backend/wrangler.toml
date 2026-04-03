@@ -1,0 +1,25 @@
+name = "cli-route-backend"
+compatibility_date = "2024-03-20"
+main = "src/index.ts"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cli_db"
+database_id = "local-db-id"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "cli-route-artifacts"
+
+[[vectorize]]
+binding = "VECTOR"
+index_name = "cli-route-idx"
+
+[durable_objects]
+bindings = [
+  { name = "AGENT_ROOM", class_name = "AgentRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["AgentRoom"]
