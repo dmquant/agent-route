@@ -63,9 +63,20 @@ sequenceDiagram
 
 ### 🚀 Step-by-Step Quickstart
 
-#### 1. System Requirements
+#### 1. System Requirements & Python Installation
 - [Node.js](https://nodejs.org/en) (v20+) for building the React SPA
-- [Python 3.10+](https://www.python.org/) for building the localized FastAPI core.
+- **Python 3.10+** for the localized FastAPI core. If you do not have Python installed, please follow your system instructions below:
+
+  **macOS (via Homebrew):**
+  ```bash
+  brew install python@3.11
+  ```
+  **Ubuntu / Debian:**
+  ```bash
+  sudo apt update && sudo apt install python3 python3-venv python3-pip
+  ```
+  **Windows:** Download the official installer from [Python.org](https://www.python.org/downloads/windows/) (ensure "Add python.exe to PATH" is checked during installation!).
+
 - *Your target AI CLI tools installed globally (e.g., `npm i -g @anthropic-ai/claude-code`, etc)*
 
 #### 2. Prepare the Environment
@@ -180,9 +191,20 @@ sequenceDiagram
 
 ### 🚀 安装与运行步骤
 
-#### 1. 系统要求
+#### 1. 系统要求与 Python 安装指南
 - [Node.js](https://nodejs.org/en) (v20+)：用于构建 React 前端应用。
-- [Python 3.10+](https://www.python.org/)：用于部署本地的 FastAPI 核心桥接器。
+- **Python 3.10+**：用于部署本地的 FastAPI 核心桥接器。如果你还未安装 Python，请根据你的系统执行以下安装步骤：
+
+  **macOS (推荐通过 Homebrew):**
+  ```bash
+  brew install python@3.11
+  ```
+  **Ubuntu / Debian (Linux):**
+  ```bash
+  sudo apt update && sudo apt install python3 python3-venv python3-pip
+  ```
+  **Windows:** 请前往 [Python.org](https://www.python.org/downloads/windows/) 下载官方安装包（**安装时务必勾选 "Add python.exe to PATH"**！）。
+
 - *全局安装你想要使用的 AI 命令行工具 (例如：`npm i -g @anthropic-ai/claude-code` 等)*
 
 #### 2. 环境初始化

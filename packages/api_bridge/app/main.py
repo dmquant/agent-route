@@ -7,6 +7,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import websockets
+import httpx
 
 from app.executor import run_cli_client
 
@@ -36,7 +37,26 @@ class ExecutionResponse(BaseModel):
     output: str
 
 # ---------------------------------------------
-# 1. Structured REST Endpoint (For External Desktop/Apps)
+# 1. Native Model Discovery & Configuration
+# ---------------------------------------------
+@app.get("/models/ollama")
+async def get_ollama_models():
+    """Queries localhost:11434 for locally installed models"""
+    if os.getenv("ENABLE_OLLAMA_API") != "true":
+        return {"models": []}
+        
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("http://localhost:11434/api/tags", timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"models": [m["name"] for m in data.get("models", [])]}
+    except Exception as e:
+         print(f"Ollama discovery failed: {e}")
+         return {"models": []}
+         
+# ---------------------------------------------
+# 2. Structured REST Endpoint (For External Desktop/Apps)
 # ---------------------------------------------
 @app.post("/execute", response_model=ExecutionResponse)
 async def execute_task(req: ExecutionRequest):
@@ -51,15 +71,20 @@ async def execute_task(req: ExecutionRequest):
         raise HTTPException(status_code=403, detail="Claude route disabled inside global .env")
     elif req.client == "codex" and os.getenv("ENABLE_CODEX_SERVER") != "true":
         raise HTTPException(status_code=403, detail="Codex route disabled inside global .env")
+    elif req.client == "ollama" and os.getenv("ENABLE_OLLAMA_API") != "true":
+        raise HTTPException(status_code=403, detail="Ollama route disabled inside global .env")
 
     workspace_str = req.workspace_id or "default_sync"
     workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
 
-    # Empty callback for REST
     async def noop_log(msg: str):
         pass
 
-    result = await run_cli_client(req.client, req.prompt, workspace_dir, noop_log)
+    target_opt_kwargs = {}
+    if req.client == "ollama":
+        target_opt_kwargs["model"] = "llama3" # Default fallback for REST
+
+    result = await run_cli_client(req.client, req.prompt, workspace_dir, noop_log, **target_opt_kwargs)
     return ExecutionResponse(exitCode=result["exitCode"], output=result["output"])
 
 
@@ -92,12 +117,14 @@ async def websocket_endpoint(websocket: WebSocket):
                  prompt = data.get("prompt")
                  node_id = data.get("nodeId", "execute_node")
                  workspace_str = data.get("workflowId", "fallback_node")
+                 target_model = data.get("model") # newly added for Ollama natively
             else:
                  # Fallback parser
                  mode = data.get("mode") or data.get("client")
                  prompt = data.get("content") or data.get("prompt")
                  node_id = "generic"
                  workspace_str = "default_bridge"
+                 target_model = data.get("model")
 
             if not mode or not prompt:
                 continue
@@ -111,6 +138,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
             elif mode == "codex" and os.getenv("ENABLE_CODEX_SERVER") != "true":
                 await websocket.send_json({"type": "node_execution_log", "nodeId": node_id, "log": "❌ Codex disabled locally in .env\n"})
+                continue
+            elif mode == "ollama" and os.getenv("ENABLE_OLLAMA_API") != "true":
+                await websocket.send_json({"type": "node_execution_log", "nodeId": node_id, "log": "❌ Ollama HTTP daemon disabled locally in .env\n"})
                 continue
 
             # Emit startup
@@ -128,9 +158,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
             workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
             
+            target_opt_kwargs = {}
+            if mode == "ollama" and target_model:
+                target_opt_kwargs["model"] = target_model
+            
             # Execute Native Asyncio Process
             print(f"Intercepted Native WebSocket invocation for '{mode}'.")
-            result = await run_cli_client(mode, prompt, workspace_dir, stream_log)
+            result = await run_cli_client(mode, prompt, workspace_dir, stream_log, **target_opt_kwargs)
             
             # Emit completed
             await websocket.send_json({

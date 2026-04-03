@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Terminal, Bot, Code, Play, Send, LayoutPanelLeft } from 'lucide-react';
 
-type AgentMode = 'gemini' | 'claude' | 'codex';
+type AgentMode = 'gemini' | 'claude' | 'codex' | 'ollama';
 
 interface LogEntry {
   id: string;
@@ -15,7 +15,22 @@ export default function App() {
   const [input, setInput] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Fetch Ollama Models Natively from Python
+  useEffect(() => {
+    fetch('http://localhost:8000/models/ollama')
+      .then(res => res.json())
+      .then(data => {
+        if (data.models && data.models.length > 0) {
+          setOllamaModels(data.models);
+          setSelectedModel(data.models[0]);
+        }
+      })
+      .catch(err => console.error("Could not discover Ollama models from backend:", err));
+  }, []);
 
   useEffect(() => {
     let reconnectTimeout: ReturnType<typeof setTimeout>;
@@ -42,7 +57,25 @@ export default function App() {
           if (data.type === 'node_execution_started') {
             addLog('system', `🏁 Execution sequence initiated for: ${data.nodeId}`);
           } else if (data.type === 'node_execution_log') {
-            addLog(data.source || 'agent', data.log);
+            setLogs(prev => {
+              if (prev.length > 0 && prev[prev.length - 1].source === (data.source || 'agent')) {
+                // Concatenate streamed tokens into the active bubble
+                const newLogs = [...prev];
+                newLogs[newLogs.length - 1] = {
+                  ...newLogs[newLogs.length - 1],
+                  content: newLogs[newLogs.length - 1].content + data.log
+                };
+                return newLogs;
+              } else {
+                // Spawn a new bubble
+                return [...prev, {
+                  id: Math.random().toString(36).substring(7),
+                  source: data.source || 'agent',
+                  content: data.log,
+                  timestamp: Date.now()
+                }];
+              }
+            });
           } else if (data.type === 'node_execution_completed') {
             addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
           } else if (data.content) {
@@ -96,6 +129,7 @@ export default function App() {
         type: 'execute_node',
         client: activeMode,
         prompt: input,
+        model: activeMode === 'ollama' ? selectedModel : undefined,
         nodeId: `ui_node_${Date.now()}`
       }));
     } else {
@@ -109,6 +143,7 @@ export default function App() {
     { id: 'gemini', label: 'Gemini CLI', icon: Terminal, description: 'Headless mode execution' },
     { id: 'claude', label: 'Claude Code', icon: Bot, description: 'Remote control session' },
     { id: 'codex', label: 'Codex Server', icon: Code, description: 'OpenAI-compatible server' },
+    { id: 'ollama', label: 'Local Ollama', icon: Play, description: 'Native HTTP HTTP stream' }
   ];
 
   return (
@@ -147,6 +182,21 @@ export default function App() {
             )
           })}
         </div>
+
+        {activeMode === 'ollama' && ollamaModels.length > 0 && (
+          <div className="flex flex-col gap-2 mt-4 px-2 animate-in fade-in slide-in-from-top-2 duration-300">
+             <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">Select Model</h2>
+             <select 
+               className="w-full bg-card border border-border rounded-lg p-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+               value={selectedModel}
+               onChange={(e) => setSelectedModel(e.target.value)}
+             >
+               {ollamaModels.map(m => (
+                 <option key={m} value={m}>{m}</option>
+               ))}
+             </select>
+          </div>
+        )}
 
         <div className="mt-auto pt-6 px-2">
           <div className="flex items-center gap-2 text-sm">
