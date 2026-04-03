@@ -42,12 +42,13 @@ async def run_cli_client(
     # -----------------------
     if client_name == "ollama":
         target_model = kwargs.get("model", "llama3")
-        await on_log(f"\n[System] Connecting natively to localhost:11434 for {target_model}...\n")
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        await on_log(f"\n[System] Connecting natively to {ollama_url} for {target_model}...\n")
         try:
             async with httpx.AsyncClient() as client:
                 async with client.stream(
                     "POST", 
-                    "http://localhost:11434/api/generate", 
+                    f"{ollama_url}/api/generate", 
                     json={"model": target_model, "prompt": prompt},
                     timeout=180.0
                 ) as response:
@@ -68,6 +69,48 @@ async def run_cli_client(
             return {"output": "".join(full_output), "exitCode": 0}
         except Exception as e:
             error_msg = f"Failed to connect to local Ollama Instance: {e}"
+            await on_log(f"\n[Fatal] {error_msg}\n")
+            return {"output": error_msg, "exitCode": 1}
+
+    # -----------------------
+    # NATIVE HTTP STREAMING (MFLUX Remote Graphic Rendering)
+    # -----------------------
+    if client_name == "mflux":
+        mflux_url = os.getenv("MFLUX_BASE_URL", "http://192.168.0.212:8000")
+        await on_log(f"\n[System] Connecting to remote MFLUX Visual Inference Engine at {mflux_url}...\n[System] Depending on the cache state, this could take up to 45 seconds for 30 steps. Please wait.\n")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{mflux_url}/generate",
+                    json={
+                        "prompt": prompt,
+                        "width": 1024,
+                        "height": 1024,
+                        "steps": 30,
+                        "guidance": 4.5,
+                        "num_images": 1,
+                        "format": "png"
+                    },
+                    timeout=None # Disabled completely to allow deep cache downloading on the remote node
+                )
+                if resp.status_code != 200:
+                    error_msg = f"[Fatal] MFLUX API Error HTTP {resp.status_code}: {resp.text}"
+                    await on_log(error_msg + "\n")
+                    return {"output": error_msg, "exitCode": 1}
+                
+                payload = resp.json()
+                images = payload.get("images", [])
+                if not images:
+                    error_msg = "[Fatal] Remote API responded with HTTP 200 but no visual base64 array elements."
+                    await on_log(error_msg + "\n")
+                    return {"output": error_msg, "exitCode": 1}
+                
+                b64 = images[0].get("b64", "")
+                await on_log("\n[System] Graphic successfully generated and fully loaded into WebSockets.\n")
+                return {"output": "Generative operation finalized correctly.", "exitCode": 0, "image_b64": b64}
+        except Exception as e:
+            error_name = type(e).__name__
+            error_msg = f"Failed to connect to local MFLUX Image Server [{error_name}]: {e}"
             await on_log(f"\n[Fatal] {error_msg}\n")
             return {"output": error_msg, "exitCode": 1}
 

@@ -46,8 +46,9 @@ async def get_ollama_models():
         return {"models": []}
         
     try:
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         async with httpx.AsyncClient() as client:
-            resp = await client.get("http://localhost:11434/api/tags", timeout=3.0)
+            resp = await client.get(f"{ollama_url}/api/tags", timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
                 return {"models": [m["name"] for m in data.get("models", [])]}
@@ -73,6 +74,8 @@ async def execute_task(req: ExecutionRequest):
         raise HTTPException(status_code=403, detail="Codex route disabled inside global .env")
     elif req.client == "ollama" and os.getenv("ENABLE_OLLAMA_API") != "true":
         raise HTTPException(status_code=403, detail="Ollama route disabled inside global .env")
+    elif req.client == "mflux" and os.getenv("ENABLE_MFLUX_IMAGE") != "true":
+        raise HTTPException(status_code=403, detail="MFLUX routing disabled inside global .env")
 
     workspace_str = req.workspace_id or "default_sync"
     workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
@@ -142,6 +145,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif mode == "ollama" and os.getenv("ENABLE_OLLAMA_API") != "true":
                 await websocket.send_json({"type": "node_execution_log", "nodeId": node_id, "log": "❌ Ollama HTTP daemon disabled locally in .env\n"})
                 continue
+            elif mode == "mflux" and os.getenv("ENABLE_MFLUX_IMAGE") != "true":
+                await websocket.send_json({"type": "node_execution_log", "nodeId": node_id, "log": "❌ MFLUX Image Server endpoint disabled locally in .env\n"})
+                continue
 
             # Emit startup
             await websocket.send_json({
@@ -165,6 +171,14 @@ async def websocket_endpoint(websocket: WebSocket):
             # Execute Native Asyncio Process
             print(f"Intercepted Native WebSocket invocation for '{mode}'.")
             result = await run_cli_client(mode, prompt, workspace_dir, stream_log, **target_opt_kwargs)
+            
+            # Sub-intercept binary base64 graphic output payloads specifically!
+            if "image_b64" in result:
+                await websocket.send_json({
+                    "type": "node_execution_image",
+                    "nodeId": node_id,
+                    "b64": result["image_b64"]
+                })
             
             # Emit completed
             await websocket.send_json({

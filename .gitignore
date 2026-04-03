@@ -34,3 +34,5 @@ claude_remote.log
 
 # Daemon Tracking
 .route-service.pid
+.gitignore
+test_mflux.py

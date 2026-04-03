@@ -25,6 +25,7 @@ graph TD
     C -->|"Gemini Enabled"| G["npx gemini -p --output-format json"]:::os
     C -->|"Claude Enabled"| CL["npx claude-code --dangerously-skip-permissions"]:::os
     C -->|"Codex Enabled"| CO["npx codex exec --json"]:::os
+    C -->|"Ollama Enabled"| OL["HTTP Stream (httpx) to 11434"]:::os
     end
 ```
 
@@ -96,6 +97,8 @@ Edit `.env` to precisely enable or disable agents. The local Python Daemon will 
 ENABLE_CLAUDE_REMOTE_CONTROL=true
 ENABLE_GEMINI_CLI=true
 ENABLE_CODEX_SERVER=false
+ENABLE_OLLAMA_API=true
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 #### 4. Claude Pre-Authentication
@@ -118,6 +121,20 @@ Navigate to `http://localhost:5173` to use the Dashboard! When finished, termina
 ```bash
 ./stop.sh
 ```
+
+#### 6. Notes on Remote Node Execution (MFLUX / Ollama)
+If you are pointing the system to a remote node API (e.g. `http://192.168.0.2:8000`) for generative tasks:
+- **Zero-Timeout:** The Python gateway explicitly disables timeouts for graphic generation.
+- **Cold Booting:** The very first request you send to MFLUX may take up to several minutes! This occurs because the remote API node must download gigabytes of model weights into its Hugging Face cache.
+- **Firewall:** Ensure you have allowed inbound Python traffic on your MacOS/Linux firewall (System Settings → Network → Firewall) for your chosen remote ports.
+
+#### 7. Example Output (MFLUX Qwen-Image)
+Here is an example of the Agent Route Service orchestrating a visual render over the LAN to the `mlx-community/Qwen-Image-2512-8bit` LLM node:
+
+**Prompt:** `A futuristic cybernetic tiger roaming a neon city`
+
+**Result:**
+![QWen Image Result](public/images/download.png)
 
 ### 💻 External API Access
 Because the underlying architecture leverages **FastAPI**, you can bypass the React UI entirely and call the agents synchronously from any desktop app or script:
@@ -153,6 +170,7 @@ graph TD
     C -->|"验证 Gemini 为启用"| G["npx gemini -p --output-format json"]:::os
     C -->|"验证 Claude 为启用"| CL["npx claude-code --dangerously-skip-permissions"]:::os
     C -->|"验证 Codex 为启用"| CO["npx codex exec --json"]:::os
+    C -->|"验证 Ollama 为启用"| OL["原生 HTTP 流 (httpx) 通信 11434"]:::os
     end
 ```
 
@@ -223,7 +241,9 @@ cp .env.example .env
 ```env
 ENABLE_CLAUDE_REMOTE_CONTROL=true
 ENABLE_GEMINI_CLI=true
-ENABLE_CODEX_SERVER=true
+ENABLE_CODEX_SERVER=false
+ENABLE_OLLAMA_API=true
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 #### 4. Claude 账号预授权
@@ -246,6 +266,20 @@ npx @anthropic-ai/claude-code auth login
 ```bash
 ./stop.sh
 ```
+
+#### 6. 关于远程节点执行的特别说明 (MFLUX / Ollama)
+如果您正在将系统指向局域网的远程 API 节点 (例如 `http://192.168.0.2:8000`) 执行生成任务：
+- **无超时设定:** Python 网关已明确移除了对长时间图像生成任务的超时限制。
+- **首次冷启动缓存:** 您向 MFLUX 发送的**第一条**图像请求可能会耗费数分钟的时间！因为这取决于远程节点通过 Hugging Face 完整下载并加载数百MB甚至数GB模型权重的速度。
+- **防火墙设定:** 请确保您已在承载远程节点的电脑管家或 macOS 防火墙（系统设置 → 网络）中对相关端口放行了入站流量。
+
+#### 7. 渲染示例 (MFLUX Qwen-Image)
+以下是 Agent Route Service 通过局域网跨系统调用 `mlx-community/Qwen-Image-2512-8bit` 节点并实时传回前端的渲染结果展示：
+
+**Prompt 提示词:** `A futuristic cybernetic tiger roaming a neon city`
+
+**Result 渲染结果:**
+![QWen Image Result](public/images/download.png)
 
 ### 💻 外部开发者 API 介入
 由于底层使用 **FastAPI** 直接重构，你不受任何 React 用户界面的限制！你可以从桌面自动化工具、脚本语言中直接向底层桥接器发起同步调用请求：

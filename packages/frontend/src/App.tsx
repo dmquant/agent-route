@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
-import { Terminal, Bot, Code, Play, Send, LayoutPanelLeft } from 'lucide-react';
+import { Terminal, Bot, Code, Play, Send, LayoutPanelLeft, Image as ImageIcon } from 'lucide-react';
 
-type AgentMode = 'gemini' | 'claude' | 'codex' | 'ollama';
+type AgentMode = 'gemini' | 'claude' | 'codex' | 'ollama' | 'mflux';
 
 interface LogEntry {
   id: string;
   source: 'user' | 'agent' | 'system';
   content: string;
+  imageB64?: string;
   timestamp: number;
 }
 
@@ -76,6 +77,14 @@ export default function App() {
                 }];
               }
             });
+          } else if (data.type === 'node_execution_image') {
+            setLogs(prev => [...prev, {
+              id: Math.random().toString(36).substring(7),
+              source: 'agent',
+              content: '[✨ MFLUX Visual Renderer: Graphic Finalized]',
+              imageB64: data.b64,
+              timestamp: Date.now()
+            }]);
           } else if (data.type === 'node_execution_completed') {
             addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
           } else if (data.content) {
@@ -143,7 +152,8 @@ export default function App() {
     { id: 'gemini', label: 'Gemini CLI', icon: Terminal, description: 'Headless mode execution' },
     { id: 'claude', label: 'Claude Code', icon: Bot, description: 'Remote control session' },
     { id: 'codex', label: 'Codex Server', icon: Code, description: 'OpenAI-compatible server' },
-    { id: 'ollama', label: 'Local Ollama', icon: Play, description: 'Native HTTP HTTP stream' }
+    { id: 'ollama', label: 'Local Ollama', icon: Play, description: 'Native HTTP HTTP stream' },
+    { id: 'mflux', label: 'MFLUX Remote Graphic', icon: ImageIcon, description: 'Qwen Image Renderer' }
   ];
 
   return (
@@ -238,6 +248,11 @@ export default function App() {
                   `}
                 >
                   {log.content}
+                  {log.imageB64 && (
+                    <div className="mt-4 border border-border/40 rounded-lg overflow-hidden shadow-inner max-w-sm">
+                      <img src={`data:image/png;base64,${log.imageB64}`} alt="Rendered Media Layer" className="w-full h-auto object-cover" />
+                    </div>
+                  )}
                 </div>
               </div>
             ))
