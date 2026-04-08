@@ -31,6 +31,7 @@ class ExecutionRequest(BaseModel):
     workspace_id: Optional[str] = None
     node_id: Optional[str] = "api_request"
     role: Optional[str] = "system"
+    model: Optional[str] = None
 
 class ExecutionResponse(BaseModel):
     exitCode: Optional[int]
@@ -89,6 +90,63 @@ async def execute_task(req: ExecutionRequest):
 
     result = await run_cli_client(req.client, req.prompt, workspace_dir, noop_log, **target_opt_kwargs)
     return ExecutionResponse(exitCode=result["exitCode"], output=result["output"])
+
+from fastapi.responses import StreamingResponse
+import asyncio
+import json
+
+@app.post("/execute/stream")
+async def execute_task_stream(req: ExecutionRequest):
+    """
+    Execute streaming LLM task using HTTP JSON Streams (ndjson).
+    This allows CLI integrations and curl without WebSocket reliance.
+    """
+    if req.client == "gemini" and os.getenv("ENABLE_GEMINI_CLI") != "true":
+        raise HTTPException(status_code=403, detail="Gemini route disabled")
+    elif req.client == "claude" and os.getenv("ENABLE_CLAUDE_REMOTE_CONTROL") != "true":
+        raise HTTPException(status_code=403, detail="Claude route disabled")
+    elif req.client == "codex" and os.getenv("ENABLE_CODEX_SERVER") != "true":
+        raise HTTPException(status_code=403, detail="Codex route disabled")
+    elif req.client == "ollama" and os.getenv("ENABLE_OLLAMA_API") != "true":
+        raise HTTPException(status_code=403, detail="Ollama route disabled")
+    elif req.client == "mflux" and os.getenv("ENABLE_MFLUX_IMAGE") != "true":
+        raise HTTPException(status_code=403, detail="MFLUX routing disabled")
+
+    workspace_str = req.workspace_id or "default_sync"
+    workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
+
+    q = asyncio.Queue()
+
+    async def stream_log(chunk: str):
+        await q.put({"type": "node_execution_log", "log": chunk})
+
+    target_opt_kwargs = {}
+    if req.client == "ollama" and req.model:
+        target_opt_kwargs["model"] = req.model
+    elif req.client == "ollama":
+        target_opt_kwargs["model"] = "llama3"
+
+    async def worker():
+        try:
+            await q.put({"type": "node_execution_started"})
+            result = await run_cli_client(req.client, req.prompt, workspace_dir, stream_log, **target_opt_kwargs)
+            if "image_b64" in result:
+                await q.put({"type": "node_execution_image", "b64": result["image_b64"]})
+            await q.put({"type": "node_execution_completed", "exitCode": result["exitCode"]})
+        except Exception as e:
+            await q.put({"type": "node_execution_log", "log": f"\n[Fatal Router Error] {e}\n"})
+            await q.put({"type": "node_execution_completed", "exitCode": 1})
+
+    async def generate_ndjson():
+        task = asyncio.create_task(worker())
+        while True:
+            item = await q.get()
+            yield json.dumps(item) + "\n"
+            if item["type"] == "node_execution_completed":
+                break
+        await task
+
+    return StreamingResponse(generate_ndjson(), media_type="application/x-ndjson")
 
 
 from fastapi import WebSocket, WebSocketDisconnect

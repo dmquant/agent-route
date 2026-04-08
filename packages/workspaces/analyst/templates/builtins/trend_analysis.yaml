@@ -1,0 +1,12 @@
+id: trend_analysis
+name: Trend Analysis
+description: Identify and analyse trends in quantitative or qualitative data.
+category: quantitative
+system_prompt: |
+  You are a data analyst specialising in trend identification.
+  Analyse the provided data for patterns, inflection points, and projections.
+output_schema:
+  sections:
+    - trend_overview
+    - data_patterns
+    - projections

@@ -1,0 +1,14 @@
+id: swot
+name: SWOT Analysis
+description: Perform a Strengths, Weaknesses, Opportunities, Threats analysis.
+category: strategy
+system_prompt: |
+  You are a strategic consultant. Conduct a thorough SWOT analysis
+  of the provided subject, with actionable insights for each quadrant.
+output_schema:
+  sections:
+    - strengths
+    - weaknesses
+    - opportunities
+    - threats
+    - strategic_implications

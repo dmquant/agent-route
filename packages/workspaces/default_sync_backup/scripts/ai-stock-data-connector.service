@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Stock Research Data Connector (Wind)
+After=docker.service postgres.service redis.service kafka.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-stock-research
+# Use docker-compose to manage the service
+ExecStart=/usr/local/bin/docker-compose up data_connector
+ExecStop=/usr/local/bin/docker-compose stop data_connector
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=ai-stock-data-connector
+
+[Install]
+WantedBy=multi-user.target
