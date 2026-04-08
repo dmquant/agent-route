@@ -10,6 +10,7 @@ import websockets
 import httpx
 
 from app.executor import run_cli_client
+from app.history import init_db, save_log, get_logs
 
 # Boot Environment Configurations
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), '.env')
@@ -40,6 +41,14 @@ class ExecutionResponse(BaseModel):
 # ---------------------------------------------
 # 1. Native Model Discovery & Configuration
 # ---------------------------------------------
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
+@app.get("/api/logs")
+def api_get_logs():
+    return {"logs": get_logs()}
+
 @app.get("/models/ollama")
 async def get_ollama_models():
     """Queries localhost:11434 for locally installed models"""
@@ -213,7 +222,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 "nodeId": node_id
             })
 
+            full_out_array = []
             async def stream_log(chunk: str):
+                full_out_array.append(chunk)
                 await websocket.send_json({
                     "type": "node_execution_log",
                     "nodeId": node_id,
@@ -232,11 +243,17 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Sub-intercept binary base64 graphic output payloads specifically!
             if "image_b64" in result:
+                full_out_array.append("\\n[System] Graphic successfully generated in response stream.")
                 await websocket.send_json({
                     "type": "node_execution_image",
                     "nodeId": node_id,
                     "b64": result["image_b64"]
                 })
+            
+            # Save the execution trace cleanly to SQLite
+            status_calc = "success" if result["exitCode"] == 0 else "error"
+            title_calc = prompt[:40] + ("..." if len(prompt) > 40 else "")
+            save_log(title=title_calc, agent=mode, status=status_calc, content="".join(full_out_array))
             
             # Emit completed
             await websocket.send_json({

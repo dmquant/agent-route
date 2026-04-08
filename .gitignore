@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 packages/api_bridge/venv/
+packages/workspaces/
 .pytest_cache/
 
 # Cloudflare & Database State

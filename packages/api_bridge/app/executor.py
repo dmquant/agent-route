@@ -18,7 +18,8 @@ async def run_cli_client(
 
     if client_name == "gemini":
         cmd = "npx"
-        args = ["gemini", "-p", prompt, "--output-format", "json"]
+        skills_dir = os.path.expanduser("~/.gemini/skills")
+        args = ["gemini", "-p", prompt, "--output-format", "json", "--include-directories", skills_dir]
     elif client_name == "claude":
         cmd = "npx"
         args = ["@anthropic-ai/claude-code", "-p", "--dangerously-skip-permissions", prompt]
