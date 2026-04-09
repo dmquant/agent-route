@@ -1,5 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
-import { Terminal, Bot, Send, PanelLeftClose, PanelLeft, PanelRight, PanelRightClose, FolderOpen } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Terminal, Bot, Send, PanelLeftClose, PanelLeft,
+  PanelRight, PanelRightClose, FolderOpen,
+  Loader2, Wifi, WifiOff, Zap, Clock, Radio,
+  Users, ChevronDown, ChevronRight, Trophy, AlertCircle, CheckCircle2,
+} from 'lucide-react';
 import { OutputParser } from '../components/OutputParser';
 import { SessionPanel } from '../components/SessionPanel';
 import { WorkspacePanel } from '../components/WorkspacePanel';
@@ -8,13 +13,223 @@ import { useSessionState } from '../hooks/useSessionState';
 
 type AgentMode = 'gemini' | 'claude' | 'codex' | 'ollama' | 'mflux';
 
+interface MultiAgentResult {
+  agent: string;
+  success: boolean;
+  exit_code: number;
+  output: string;
+  isWinner?: boolean;
+}
+
 interface LogEntry {
   id: string;
   source: 'user' | 'agent' | 'system';
   content: string;
   imageB64?: string;
   timestamp: number;
+  sessionId?: string;
+  multiAgentResults?: MultiAgentResult[];
+  multiStrategy?: string;
 }
+
+interface RunningTask {
+  task_id: string;
+  session_id: string;
+  agent: string;
+  prompt: string;
+  phase: string;
+  elapsed_ms: number;
+  output_chunks: number;
+  output_bytes: number;
+}
+
+// ─── Phase styling ──────────────────────
+const PHASE_STYLES: Record<string, { color: string; label: string; animate?: boolean }> = {
+  queued:       { color: 'bg-zinc-400',   label: 'Queued' },
+  connecting:   { color: 'bg-amber-400',  label: 'Connecting',  animate: true },
+  executing:    { color: 'bg-blue-400',   label: 'Executing',   animate: true },
+  streaming:    { color: 'bg-emerald-400', label: 'Streaming',  animate: true },
+  tool_calling: { color: 'bg-purple-400', label: 'Tool Call',   animate: true },
+  finalizing:   { color: 'bg-cyan-400',   label: 'Finalizing',  animate: true },
+  completed:    { color: 'bg-green-500',  label: 'Done' },
+  failed:       { color: 'bg-red-500',    label: 'Failed' },
+};
+
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+// Agent color mapping for visual distinction
+const AGENT_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  gemini:  { bg: 'bg-blue-500/10',   text: 'text-blue-400',   border: 'border-blue-500/30' },
+  claude:  { bg: 'bg-orange-500/10', text: 'text-orange-400', border: 'border-orange-500/30' },
+  codex:   { bg: 'bg-emerald-500/10',text: 'text-emerald-400',border: 'border-emerald-500/30' },
+  ollama:  { bg: 'bg-purple-500/10', text: 'text-purple-400', border: 'border-purple-500/30' },
+  mflux:   { bg: 'bg-pink-500/10',   text: 'text-pink-400',   border: 'border-pink-500/30' },
+};
+
+// ─── Multi-Agent Result Comparison ──────────────────────
+function MultiAgentResultView({ results, strategy }: { results: MultiAgentResult[]; strategy?: string }) {
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+
+  const successCount = results.filter(r => r.success).length;
+
+  return (
+    <div className="w-full mt-2 space-y-2">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-card/50 border border-border/30">
+        <Users className="w-3.5 h-3.5 text-amber-400" />
+        <span className="text-xs font-semibold text-foreground/80">
+          Multi-Agent Results
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          {successCount}/{results.length} succeeded
+        </span>
+        {strategy && (
+          <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
+            {strategy}
+          </span>
+        )}
+      </div>
+
+      {/* Agent Result Cards */}
+      <div className="grid gap-2" style={{ gridTemplateColumns: results.length <= 3 ? `repeat(${results.length}, 1fr)` : 'repeat(2, 1fr)' }}>
+        {results.map((result) => {
+          const colors = AGENT_COLORS[result.agent] || AGENT_COLORS.gemini;
+          const isExpanded = expandedAgent === result.agent;
+
+          return (
+            <div
+              key={result.agent}
+              className={`rounded-lg border transition-all cursor-pointer hover:shadow-md ${
+                result.isWinner
+                  ? 'border-amber-400/50 bg-amber-500/5 ring-1 ring-amber-400/20'
+                  : result.success
+                    ? `${colors.border} ${colors.bg}`
+                    : 'border-red-500/30 bg-red-500/5'
+              }`}
+              onClick={() => setExpandedAgent(isExpanded ? null : result.agent)}
+            >
+              {/* Card Header */}
+              <div className="flex items-center gap-2 px-3 py-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  result.success ? 'bg-green-400' : 'bg-red-400'
+                }`} />
+                <span className={`text-xs font-semibold ${colors.text}`}>
+                  {result.agent}
+                </span>
+                {result.isWinner && (
+                  <Trophy className="w-3 h-3 text-amber-400" />
+                )}
+                <span className="ml-auto flex items-center gap-1">
+                  {result.success
+                    ? <CheckCircle2 className="w-3 h-3 text-green-400" />
+                    : <AlertCircle className="w-3 h-3 text-red-400" />
+                  }
+                  <span className="text-[10px] text-muted-foreground font-mono">
+                    exit:{result.exit_code}
+                  </span>
+                </span>
+                <ChevronRight className={`w-3 h-3 text-muted-foreground transition-transform ${
+                  isExpanded ? 'rotate-90' : ''
+                }`} />
+              </div>
+
+              {/* Collapsed Preview */}
+              {!isExpanded && result.output && (
+                <div className="px-3 pb-2">
+                  <p className="text-[11px] text-muted-foreground font-mono line-clamp-2 leading-relaxed">
+                    {result.output.slice(0, 150)}{result.output.length > 150 ? '...' : ''}
+                  </p>
+                </div>
+              )}
+
+              {/* Expanded Full Output */}
+              {isExpanded && result.output && (
+                <div className="px-3 pb-3 border-t border-border/20 mt-1">
+                  <div className="mt-2 p-2 rounded bg-background/80 max-h-64 overflow-y-auto custom-scrollbar">
+                    <pre className="text-[11px] text-foreground/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
+                      {result.output}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Execution Status Bar ──────────────────────
+function ExecutionStatusBar({ tasks, activeSessionId }: { tasks: RunningTask[]; activeSessionId: string | null }) {
+  // Show tasks for the active session first, then others
+  const sessionTasks = tasks.filter(t => t.session_id === activeSessionId);
+  const otherTasks = tasks.filter(t => t.session_id !== activeSessionId);
+  const allActive = [...sessionTasks, ...otherTasks];
+
+  if (allActive.length === 0) return null;
+
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-border/30 bg-card/20 backdrop-blur-sm overflow-x-auto custom-scrollbar">
+      <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse shrink-0" />
+      <span className="text-[11px] text-muted-foreground font-medium shrink-0">
+        {allActive.length} task{allActive.length > 1 ? 's' : ''} running
+      </span>
+      <div className="h-3 w-px bg-border/40 shrink-0" />
+
+      {allActive.map(task => {
+        const phase = PHASE_STYLES[task.phase] || PHASE_STYLES.executing;
+        const isThisSession = task.session_id === activeSessionId;
+
+        return (
+          <div
+            key={task.task_id}
+            className={`flex items-center gap-2 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-all 
+              ${isThisSession
+                ? 'bg-indigo-500/8 border-indigo-500/20 text-indigo-300'
+                : 'bg-muted/20 border-border/20 text-muted-foreground'
+              }`}
+          >
+            <div className={`w-2 h-2 rounded-full ${phase.color} ${phase.animate ? 'animate-pulse' : ''}`} />
+            <span className="font-mono text-[10px] opacity-60">{task.agent}</span>
+            <span className="opacity-50">·</span>
+            <span>{phase.label}</span>
+            <span className="opacity-50">·</span>
+            <div className="flex items-center gap-1 opacity-60">
+              <Clock className="w-2.5 h-2.5" />
+              <span className="font-mono text-[10px]">{formatElapsed(task.elapsed_ms)}</span>
+            </div>
+            {task.output_bytes > 0 && (
+              <>
+                <span className="opacity-50">·</span>
+                <div className="flex items-center gap-1 opacity-60">
+                  <Zap className="w-2.5 h-2.5" />
+                  <span className="font-mono text-[10px]">{formatBytes(task.output_bytes)}</span>
+                </div>
+              </>
+            )}
+            {!isThisSession && (
+              <span className="font-mono text-[9px] px-1 py-0.5 rounded bg-muted/30 opacity-50">
+                {task.session_id.slice(0, 6)}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 
 export function Chat() {
   const [activeMode, setActiveMode] = useState<AgentMode>('gemini');
@@ -26,6 +241,11 @@ export function Chat() {
   const [showSessionPanel, setShowSessionPanel] = useState(true);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true);
   const [workspaceKey, setWorkspaceKey] = useState(0);
+  const [runningTasks, setRunningTasks] = useState<RunningTask[]>([]);
+  // Multi-agent mode
+  const [isMultiAgent, setIsMultiAgent] = useState(false);
+  const [selectedAgents, setSelectedAgents] = useState<Set<AgentMode>>(new Set(['gemini']));
+  const [multiStrategy, setMultiStrategy] = useState<string>('first_success');
   const wsRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -48,6 +268,7 @@ export function Chat() {
         content: m.content,
         imageB64: m.image_b64 || undefined,
         timestamp: m.created_at,
+        sessionId: sessionState.activeSessionId || undefined,
       }));
       setLogs(converted);
     } else if (sessionState.activeSessionId) {
@@ -67,6 +288,19 @@ export function Chat() {
       .catch(err => console.error("Could not discover Ollama models from backend:", err));
   }, []);
 
+  // ─── Poll running tasks status ────
+  const pollRunningTasks = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'query_running' }));
+    }
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(pollRunningTasks, 1500);
+    return () => clearInterval(interval);
+  }, [pollRunningTasks]);
+
+  // ─── WebSocket with background task awareness ────
   useEffect(() => {
     let reconnectTimeout: ReturnType<typeof setTimeout>;
     let isUnmounted = false;
@@ -78,47 +312,152 @@ export function Chat() {
         if (isUnmounted) return;
         setIsConnected(true);
         addLog('system', 'Connected to Agent Route Service via Session Router.');
+        // Query for any already-running tasks
+        socket.send(JSON.stringify({ type: 'query_running' }));
       };
       
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'node_execution_started') {
-            addLog('system', `🏁 Execution sequence initiated for: ${data.nodeId}`);
-          } else if (data.type === 'node_execution_log') {
-            setLogs(prev => {
-              if (prev.length > 0 && prev[prev.length - 1].source === (data.source || 'agent')) {
-                const newLogs = [...prev];
-                newLogs[newLogs.length - 1] = {
-                  ...newLogs[newLogs.length - 1],
-                  content: newLogs[newLogs.length - 1].content + data.log
-                };
-                return newLogs;
-              } else {
-                return [...prev, {
-                  id: Math.random().toString(36).substring(7),
-                  source: data.source || 'agent',
-                  content: data.log,
-                  timestamp: Date.now()
-                }];
+
+          // ─── Running tasks query response ─────
+          if (data.type === 'running_tasks') {
+            setRunningTasks(data.tasks.filter(
+              (t: RunningTask) => !['completed', 'failed'].includes(t.phase)
+            ));
+            return;
+          }
+
+          // ─── Task status updates (from background tasks) ─────
+          if (data.type === 'task_status') {
+            setRunningTasks(prev => {
+              const exists = prev.findIndex(t => t.task_id === data.task_id);
+              const isTerminal = ['completed', 'failed'].includes(data.phase);
+
+              if (isTerminal) {
+                // Remove completed task
+                return prev.filter(t => t.task_id !== data.task_id);
               }
+
+              const updated: RunningTask = {
+                task_id: data.task_id,
+                session_id: data.session_id,
+                agent: data.agent,
+                prompt: data.prompt,
+                phase: data.phase,
+                elapsed_ms: data.elapsed_ms,
+                output_chunks: data.output_chunks,
+                output_bytes: data.output_bytes,
+              };
+
+              if (exists >= 0) {
+                const next = [...prev];
+                next[exists] = updated;
+                return next;
+              }
+              return [...prev, updated];
             });
+
+            // Show phase transitions as system messages for the active session
+            if (data.session_id === sessionState.activeSessionId) {
+              const phase = PHASE_STYLES[data.phase];
+              if (phase && !['completed', 'failed'].includes(data.phase)) {
+                // Don't spam logs with every phase, only key ones
+                if (['connecting', 'streaming', 'finalizing'].includes(data.phase)) {
+                  addLog('system', `⚡ ${data.agent}: ${phase.label} (${formatElapsed(data.elapsed_ms)})`);
+                }
+              }
+            }
+            return;
+          }
+
+          // ─── Filter events for the active session ─────
+          const eventSessionId = data.sessionId;
+
+          if (data.type === 'node_execution_started') {
+            if (eventSessionId === sessionState.activeSessionId) {
+              addLog('system', `🏁 Execution initiated for: ${data.agent || data.nodeId}`);
+            }
+          } else if (data.type === 'node_execution_log') {
+            // Only show logs for active session
+            if (eventSessionId === sessionState.activeSessionId) {
+              setLogs(prev => {
+                const source = data.source || 'agent';
+                if (prev.length > 0 && prev[prev.length - 1].source === source) {
+                  const newLogs = [...prev];
+                  newLogs[newLogs.length - 1] = {
+                    ...newLogs[newLogs.length - 1],
+                    content: newLogs[newLogs.length - 1].content + data.log
+                  };
+                  return newLogs;
+                } else {
+                  return [...prev, {
+                    id: Math.random().toString(36).substring(7),
+                    source,
+                    content: data.log,
+                    timestamp: Date.now(),
+                    sessionId: eventSessionId,
+                  }];
+                }
+              });
+            }
           } else if (data.type === 'node_execution_image') {
-            setLogs(prev => [...prev, {
-              id: Math.random().toString(36).substring(7),
-              source: 'agent',
-              content: '[✨ MFLUX Visual Renderer: Graphic Finalized]',
-              imageB64: data.b64,
-              timestamp: Date.now()
-            }]);
+            if (eventSessionId === sessionState.activeSessionId) {
+              setLogs(prev => [...prev, {
+                id: Math.random().toString(36).substring(7),
+                source: 'agent',
+                content: '[✨ MFLUX Visual Renderer: Graphic Finalized]',
+                imageB64: data.b64,
+                timestamp: Date.now(),
+                sessionId: eventSessionId,
+              }]);
+            }
           } else if (data.type === 'node_execution_completed') {
-            addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
-            // Refresh session list to update title/counts
-            sessionState.refreshCurrentSession();
-            // Refresh workspace panel to show new/changed files
-            setWorkspaceKey(k => k + 1);
+            if (eventSessionId === sessionState.activeSessionId) {
+              addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
+              sessionState.refreshCurrentSession();
+              setWorkspaceKey(k => k + 1);
+            }
+          // ─── Multi-agent events ─────
+          } else if (data.type === 'multi_agent_started') {
+            if (data.sessionId === sessionState.activeSessionId) {
+              addLog('system', `🚀 Multi-Agent Fan-Out: ${data.agents?.join(', ')} (strategy: ${data.strategy})`);
+            }
+          } else if (data.type === 'multi_agent_completed') {
+            if (data.sessionId === sessionState.activeSessionId) {
+              // Build structured results for comparison UI
+              const structuredResults: MultiAgentResult[] = (data.all_results || []).map(
+                (r: { agent: string; success: boolean; exit_code: number; output?: string }) => ({
+                  agent: r.agent,
+                  success: r.success,
+                  exit_code: r.exit_code,
+                  output: r.output || '',
+                  isWinner: data.selected_agent === r.agent,
+                })
+              );
+
+              // Add comparison card as a special log entry
+              setLogs(prev => [...prev, {
+                id: Math.random().toString(36).substring(7),
+                source: 'system' as const,
+                content: `🏁 Multi-Agent Complete (${data.strategy})`,
+                timestamp: Date.now(),
+                sessionId: data.sessionId,
+                multiAgentResults: structuredResults,
+                multiStrategy: data.strategy,
+              }]);
+
+              sessionState.refreshCurrentSession();
+              setWorkspaceKey(k => k + 1);
+            }
+          } else if (data.type === 'multi_agent_error') {
+            if (data.sessionId === sessionState.activeSessionId) {
+              addLog('system', `❌ Multi-Agent Error: ${data.error}`);
+            }
           } else if (data.content) {
-            addLog(data.source || 'agent', data.content);
+            if (!eventSessionId || eventSessionId === sessionState.activeSessionId) {
+              addLog(data.source || 'agent', data.content);
+            }
           }
         } catch (e) {
           addLog('agent', event.data);
@@ -152,8 +491,20 @@ export function Chat() {
       id: Math.random().toString(36).substring(7),
       source,
       content,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     }]);
+  };
+
+  const toggleAgent = (agent: AgentMode) => {
+    setSelectedAgents(prev => {
+      const next = new Set(prev);
+      if (next.has(agent)) {
+        if (next.size > 1) next.delete(agent);
+      } else {
+        next.add(agent);
+      }
+      return next;
+    });
   };
 
   const handleSend = async () => {
@@ -172,14 +523,27 @@ export function Chat() {
     addLog('user', input);
     
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'execute_node',
-        client: activeMode,
-        prompt: input,
-        model: activeMode === 'ollama' ? selectedModel : undefined,
-        nodeId: `ui_node_${Date.now()}`,
-        sessionId: currentSessionId,
-      }));
+      if (isMultiAgent && selectedAgents.size > 1) {
+        // Multi-agent fan-out mode
+        wsRef.current.send(JSON.stringify({
+          type: 'multi_agent_run',
+          agents: Array.from(selectedAgents),
+          prompt: input,
+          sessionId: currentSessionId,
+          strategy: multiStrategy,
+          timeout: 300,
+        }));
+      } else {
+        // Single agent mode
+        wsRef.current.send(JSON.stringify({
+          type: 'execute_node',
+          client: activeMode,
+          prompt: input,
+          model: activeMode === 'ollama' ? selectedModel : undefined,
+          nodeId: `ui_node_${Date.now()}`,
+          sessionId: currentSessionId,
+        }));
+      }
     } else {
       addLog('system', 'Error: WebSocket is not connected.');
     }
@@ -195,17 +559,18 @@ export function Chat() {
     { id: 'mflux', label: 'MFLUX Visual' }
   ];
 
-  // Find active session for header display
   const activeSession = sessionState.sessions.find(s => s.id === sessionState.activeSessionId);
   const activeProject = sessionState.projects.find(p => p.id === activeSession?.project_id);
+  const hasRunningTasksForSession = runningTasks.some(t => t.session_id === sessionState.activeSessionId);
 
   return (
     <div className="flex h-full relative z-10 w-full">
-      {/* Session Panel */}
+      {/* Session Panel — pass running session IDs for indicators */}
       <SessionPanel
         state={sessionState}
         isOpen={showSessionPanel}
         onToggle={() => setShowSessionPanel(!showSessionPanel)}
+        runningSessions={new Set(runningTasks.map(t => t.session_id))}
       />
 
       {/* Main Chat Area */}
@@ -241,6 +606,12 @@ export function Chat() {
                   {activeSession.title}
                 </span>
               )}
+              {hasRunningTasksForSession && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  Running
+                </span>
+              )}
               {!activeSession && (
                 <span className="text-sm font-medium text-foreground/40 italic">
                   No session selected
@@ -249,22 +620,68 @@ export function Chat() {
             </div>
 
             <div className="h-5 w-[1px] bg-border mx-2 shrink-0" />
-            <div className="flex gap-2 shrink-0">
+
+            {/* Multi-agent toggle */}
+            <button
+              onClick={() => setIsMultiAgent(!isMultiAgent)}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all shrink-0 ${
+                isMultiAgent
+                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                  : 'bg-card border border-border/50 text-muted-foreground hover:bg-muted'
+              }`}
+              title="Toggle multi-agent mode"
+            >
+              <Users className="w-3 h-3" />
+              Multi
+            </button>
+
+            <div className="flex gap-1.5 shrink-0">
               {modes.map(mode => (
                 <button
                   key={mode.id}
-                  onClick={() => setActiveMode(mode.id as AgentMode)}
+                  onClick={() => {
+                    if (isMultiAgent) {
+                      toggleAgent(mode.id as AgentMode);
+                    } else {
+                      setActiveMode(mode.id as AgentMode);
+                    }
+                  }}
                   className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                    activeMode === mode.id 
-                      ? 'bg-indigo-500 text-white shadow-sm' 
-                      : 'bg-card border border-border/50 text-muted-foreground hover:bg-muted'
+                    isMultiAgent
+                      ? selectedAgents.has(mode.id as AgentMode)
+                        ? 'bg-amber-500/80 text-white shadow-sm ring-1 ring-amber-400/50'
+                        : 'bg-card border border-border/50 text-muted-foreground hover:bg-muted'
+                      : activeMode === mode.id 
+                        ? 'bg-indigo-500 text-white shadow-sm' 
+                        : 'bg-card border border-border/50 text-muted-foreground hover:bg-muted'
                   }`}
                 >
+                  {isMultiAgent && selectedAgents.has(mode.id as AgentMode) && (
+                    <span className="mr-1">✓</span>
+                  )}
                   {mode.label}
                 </button>
               ))}
             </div>
-            {activeMode === 'ollama' && ollamaModels.length > 0 && (
+
+            {/* Strategy selector (multi-agent only) */}
+            {isMultiAgent && selectedAgents.size > 1 && (
+              <div className="relative shrink-0">
+                <select
+                  className="appearance-none bg-card border border-amber-500/30 text-amber-300 rounded-full px-3 pr-6 py-1 text-[11px] font-medium focus:outline-none focus:ring-1 focus:ring-amber-500/50 cursor-pointer"
+                  value={multiStrategy}
+                  onChange={(e) => setMultiStrategy(e.target.value)}
+                >
+                  <option value="first_success">🏆 First Success</option>
+                  <option value="best_effort">⚡ Best Effort</option>
+                  <option value="majority_vote">🗳️ Majority Vote</option>
+                  <option value="all">📋 All Results</option>
+                </select>
+                <ChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 text-amber-400 pointer-events-none" />
+              </div>
+            )}
+
+            {!isMultiAgent && activeMode === 'ollama' && ollamaModels.length > 0 && (
                <select 
                  className="ml-2 bg-card border border-border rounded-full px-3 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
                  value={selectedModel}
@@ -276,7 +693,10 @@ export function Chat() {
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <div className="flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full bg-card border border-border/50">
-              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-destructive animate-pulse'}`} />
+              {isConnected
+                ? <Wifi className="w-3.5 h-3.5 text-green-400" />
+                : <WifiOff className="w-3.5 h-3.5 text-destructive animate-pulse" />
+              }
               {isConnected ? 'Connected' : 'Reconnecting...'}
             </div>
             <button
@@ -290,6 +710,9 @@ export function Chat() {
             </button>
           </div>
         </div>
+
+        {/* Execution Status Bar — shows all running tasks */}
+        <ExecutionStatusBar tasks={runningTasks} activeSessionId={sessionState.activeSessionId} />
 
         {/* Logs Area */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-5xl mx-auto w-full">
@@ -329,6 +752,14 @@ export function Chat() {
                 >
                   {log.source === 'user' ? (
                     log.content
+                  ) : log.multiAgentResults ? (
+                    <div>
+                      <OutputParser content={log.content} />
+                      <MultiAgentResultView
+                        results={log.multiAgentResults}
+                        strategy={log.multiStrategy}
+                      />
+                    </div>
                   ) : (
                     <OutputParser content={log.content} />
                   )}
@@ -356,7 +787,7 @@ export function Chat() {
                   handleSend();
                 }
               }}
-              placeholder={`Instruct ${activeMode}... (Shift+Enter for context)`}
+              placeholder={isMultiAgent && selectedAgents.size > 1 ? `Fan-out to ${Array.from(selectedAgents).join(', ')}... (${multiStrategy})` : `Instruct ${activeMode}... (Shift+Enter for context)`}
               className="w-full bg-card border border-border/80 group-focus-within:border-indigo-500/50 rounded-xl pl-4 pr-16 py-4 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans text-sm resize-none shadow-sm min-h-[56px] max-h-48 overflow-y-auto"
               rows={1}
             />

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   Plus, MessageSquare, Trash2, ChevronDown, ChevronRight,
-  Hash, X, FolderPlus, Sparkles
+  Hash, X, FolderPlus, Sparkles, Loader2
 } from 'lucide-react';
 import type { SessionState } from '../hooks/useSessionState';
 
@@ -9,6 +9,7 @@ interface SessionPanelProps {
   state: SessionState;
   isOpen: boolean;
   onToggle: () => void;
+  runningSessions?: Set<string>;
 }
 
 const PROJECT_COLORS = [
@@ -28,7 +29,7 @@ function timeAgo(ts: number): string {
   return `${days}d`;
 }
 
-export function SessionPanel({ state, isOpen, onToggle }: SessionPanelProps) {
+export function SessionPanel({ state, isOpen, onToggle, runningSessions = new Set() }: SessionPanelProps) {
   const [showNewProject, setShowNewProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectColor, setNewProjectColor] = useState('#6366f1');
@@ -236,6 +237,7 @@ export function SessionPanel({ state, isOpen, onToggle }: SessionPanelProps) {
                   key={session.id}
                   session={session}
                   isActive={state.activeSessionId === session.id}
+                  isRunning={runningSessions.has(session.id)}
                   onSelect={() => state.selectSession(session.id)}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -254,6 +256,7 @@ export function SessionPanel({ state, isOpen, onToggle }: SessionPanelProps) {
             key={session.id}
             session={session}
             isActive={state.activeSessionId === session.id}
+            isRunning={runningSessions.has(session.id)}
             onSelect={() => state.selectSession(session.id)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -275,6 +278,7 @@ export function SessionPanel({ state, isOpen, onToggle }: SessionPanelProps) {
                 key={session.id}
                 session={session}
                 isActive={state.activeSessionId === session.id}
+                isRunning={runningSessions.has(session.id)}
                 onSelect={() => state.selectSession(session.id)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -333,12 +337,14 @@ export function SessionPanel({ state, isOpen, onToggle }: SessionPanelProps) {
 function SessionRow({
   session,
   isActive,
+  isRunning = false,
   onSelect,
   onContextMenu,
   indent = false,
 }: {
   session: SessionState['sessions'][number];
   isActive: boolean;
+  isRunning?: boolean;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   indent?: boolean;
@@ -355,7 +361,11 @@ function SessionRow({
           : 'hover:bg-muted/40 border border-transparent'
       }`}
     >
-      <Hash className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${isActive ? 'text-indigo-400' : 'text-muted-foreground/40'}`} />
+      {isRunning ? (
+        <Loader2 className="w-3.5 h-3.5 mt-0.5 shrink-0 text-emerald-400 animate-spin" />
+      ) : (
+        <Hash className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${isActive ? 'text-indigo-400' : 'text-muted-foreground/40'}`} />
+      )}
       <div className="flex-1 min-w-0">
         <div className={`text-xs font-medium truncate ${isActive ? 'text-indigo-300' : 'text-foreground/80'}`}>
           {session.title}
@@ -368,6 +378,12 @@ function SessionRow({
             <>
               <span className="text-[10px] text-muted-foreground/30">·</span>
               <span className="text-[10px] text-muted-foreground/50">{session.message_count} msgs</span>
+            </>
+          )}
+          {isRunning && (
+            <>
+              <span className="text-[10px] text-muted-foreground/30">·</span>
+              <span className="text-[10px] text-emerald-400 font-medium">running</span>
             </>
           )}
         </div>

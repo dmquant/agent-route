@@ -1,10 +1,11 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, GitMerge, BarChart3, MessageSquare, LayoutPanelLeft } from 'lucide-react';
+import { LayoutDashboard, Users, GitMerge, BarChart3, MessageSquare, LayoutPanelLeft, Brain } from 'lucide-react';
 
 export function Sidebar() {
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard, desc: 'Overview & Reports' },
     { path: '/agents', label: 'Agents & Skills', icon: Users, desc: 'Configuration' },
+    { path: '/brain', label: 'Brain Inspector', icon: Brain, desc: 'Sessions & Context' },
     { path: '/workflows', label: 'Workflows', icon: GitMerge, desc: 'Orchestrations' },
     { path: '/routines', label: 'Daily Reports', icon: BarChart3, desc: 'Usage Analytics' },
     { path: '/chat', label: 'Workspace', icon: MessageSquare, desc: 'Interactive Terminal' },

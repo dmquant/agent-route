@@ -41,3 +41,5 @@ claude_remote.log
 .route-service.pid
 test_mflux.py
 .gitignore
+
+.temp/

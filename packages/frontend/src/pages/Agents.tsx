@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Settings, Sparkles, Brain, Code, Server, ImageIcon,
-  ChevronDown, ChevronRight, ExternalLink, Zap, Shield,
+  Sparkles, Brain, Code, Server, ImageIcon,
+  ChevronDown, ChevronRight, Zap, Shield,
   Globe, HardDrive, Package, Puzzle, RefreshCw,
   Check, X, FolderOpen, FileText, Link2,
 } from 'lucide-react';
@@ -222,23 +222,29 @@ function AgentCard({ agent }: { agent: Agent }) {
 // ─── Main Page ──────────────────────
 export function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [handHealth, setHandHealth] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'cloud' | 'local'>('all');
 
-  const fetchAgents = async () => {
+  const fetchAgents = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/agents');
-      const data = await res.json();
-      setAgents(data.agents || []);
+      const [agentsRes, healthRes] = await Promise.all([
+        fetch('http://localhost:8000/api/agents'),
+        fetch('http://localhost:8000/api/hands/health'),
+      ]);
+      const agentsData = await agentsRes.json();
+      const healthData = await healthRes.json();
+      setAgents(agentsData.agents || []);
+      setHandHealth(healthData.health || {});
     } catch (e) {
       console.error('Failed to load agents:', e);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { fetchAgents(); }, []);
+  useEffect(() => { fetchAgents(); }, [fetchAgents]);
 
   const filtered = filter === 'all' ? agents : agents.filter(a => a.class === filter);
   const totalSkills = agents.reduce((sum, a) => sum + a.skill_count, 0);
@@ -266,16 +272,29 @@ export function Agents() {
         </div>
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-4 gap-4">
           {[
-            { label: 'Cloud Agents', value: agents.filter(a => a.class === 'cloud').length, sub: 'CLI-based', color: 'text-sky-400', bg: 'bg-sky-500/10' },
-            { label: 'Local Models', value: agents.filter(a => a.class === 'local').length, sub: 'Self-hosted', color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-            { label: 'Total Skills', value: totalSkills, sub: 'Across all agents', color: 'text-indigo-400', bg: 'bg-indigo-500/10' },
+            { label: 'Cloud Agents', value: agents.filter(a => a.class === 'cloud').length, sub: 'CLI-based', color: 'text-sky-400' },
+            { label: 'Local Models', value: agents.filter(a => a.class === 'local').length, sub: 'Self-hosted', color: 'text-emerald-400' },
+            { label: 'Total Skills', value: totalSkills, sub: 'Across all agents', color: 'text-indigo-400' },
+            { label: 'Hands Online', value: Object.values(handHealth).filter(Boolean).length, sub: `of ${Object.keys(handHealth).length} registered`, color: 'text-amber-400' },
           ].map(stat => (
             <div key={stat.label} className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-4">
               <div className={`text-2xl font-bold ${stat.color}`}>{stat.value}</div>
               <div className="text-sm font-medium text-foreground mt-0.5">{stat.label}</div>
               <div className="text-xs text-muted-foreground">{stat.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Hand Health Bar */}
+        <div className="flex items-center gap-3 bg-card/30 backdrop-blur-md border border-border/30 rounded-lg px-4 py-2.5">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Hand Protocol</span>
+          <div className="h-3 w-px bg-border/50" />
+          {Object.entries(handHealth).map(([name, healthy]) => (
+            <div key={name} className="flex items-center gap-1.5 text-xs">
+              <span className={`w-1.5 h-1.5 rounded-full ${healthy ? 'bg-green-400' : 'bg-red-400'}`} />
+              <span className={`font-medium capitalize ${healthy ? 'text-foreground/80' : 'text-red-400'}`}>{name}</span>
             </div>
           ))}
         </div>
