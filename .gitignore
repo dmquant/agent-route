@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 packages/api_bridge/venv/
+packages/workspaces/*
 .pytest_cache/
 
 # Session Workspaces (agent-generated, per-session isolated dirs)
@@ -39,3 +40,4 @@ claude_remote.log
 # Daemon Tracking
 .route-service.pid
 test_mflux.py
+.gitignore
