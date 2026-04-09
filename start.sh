@@ -19,7 +19,11 @@ fi
 
 echo "🗄️ Guaranteeing database schema execution..."
 cd packages/backend
-npx wrangler d1 execute cli_db --local --file schema.sql
+if ! npx wrangler d1 execute cli_db --local --file schema.sql 2>/dev/null; then
+    echo "⚠️  Schema conflict detected — resetting local D1 database..."
+    rm -rf .wrangler/state
+    npx wrangler d1 execute cli_db --local --file schema.sql
+fi
 cd ../../
 
 # Create an empty PID file

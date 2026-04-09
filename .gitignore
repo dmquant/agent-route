@@ -12,14 +12,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 packages/api_bridge/venv/
-packages/workspaces/
 .pytest_cache/
+
+# Session Workspaces (agent-generated, per-session isolated dirs)
+packages/workspaces/
 
 # Cloudflare & Database State
 .wrangler/
 *.sqlite
 *.sqlite3
-Packages/backend/d1/
+*.db
+packages/backend/d1/
 
 # Monorepo Caches
 .turbo
@@ -35,5 +38,4 @@ claude_remote.log
 
 # Daemon Tracking
 .route-service.pid
-.gitignore
 test_mflux.py
