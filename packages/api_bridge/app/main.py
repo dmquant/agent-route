@@ -25,7 +25,7 @@ from app.session.events import EventType
 from app.brain.orchestrator import orchestrator
 from app.brain.harness import harness_manager
 from app.sandbox.pool import sandbox_pool, init_sandbox_tables
-from app.tasks import task_manager, TaskPhase
+from app.tasks import task_manager, TaskPhase, init_task_tables, get_task_history
 from app.session_store import (
     init_session_db,
     create_project, list_projects, update_project, delete_project,
@@ -82,13 +82,22 @@ class SessionUpdate(BaseModel):
 # 1. Native Model Discovery & Configuration
 # ---------------------------------------------
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     init_session_db()
     init_event_tables()
     init_sandbox_tables()
+    init_task_tables()
     # Register all execution hands (Managed Agents Phase 1)
     auto_register_all()
     print(f"[Startup] Hand Registry: {hand_registry.list_names()}")
+    # Start periodic GC for completed tasks
+    await task_manager.start_gc_loop(interval_seconds=60, max_age_ms=300000)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Graceful shutdown: cancel running tasks and persist final state."""
+    task_manager.stop_gc_loop()
+    await task_manager.shutdown()
 
 @app.get("/api/logs")
 def api_get_logs():
@@ -633,6 +642,11 @@ def api_session_tasks(session_id: str):
     tasks = task_manager.get_session_tasks(session_id)
     return {"tasks": [t.status.to_dict() for t in tasks]}
 
+@app.get("/api/tasks/history")
+def api_task_history(session_id: Optional[str] = None, limit: int = 50):
+    """Query persistent task history from SQLite."""
+    return {"tasks": get_task_history(session_id=session_id, limit=limit)}
+
 # ---------------------------------------------
 # 4b. Session-Aware Native WebSocket Streaming
 #     with Background Task Support
@@ -957,11 +971,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
 
             # Launch as background task — does NOT block the WS loop
-            asyncio.create_task(run_task(
+            _asyncio_task = asyncio.create_task(run_task(
                 task_id, session_id, mode, prompt,
                 hand, node_id, workspace_str,
                 target_model if 'target_model' in dir() else None,
             ))
+            bg_task.asyncio_task = _asyncio_task
 
     except WebSocketDisconnect:
         print("Frontend UI disconnected normally.")

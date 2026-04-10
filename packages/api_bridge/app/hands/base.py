@@ -126,5 +126,46 @@ class Hand(ABC):
             "description": self.description,
         }
 
+    async def execute_with_retry(
+        self,
+        input: str,
+        workspace_dir: str = "/tmp",
+        on_log: Optional[Callable[[str], Any]] = None,
+        max_retries: int = 2,
+        backoff_base: float = 2.0,
+        **kwargs,
+    ) -> HandResult:
+        """Execute with retry logic for transient failures.
+
+        Retries on: ConnectionError, TimeoutError, OSError.
+        Permanent errors (ValueError, RuntimeError) are raised immediately.
+        """
+        import asyncio
+
+        TRANSIENT = (ConnectionError, TimeoutError, OSError, ConnectionResetError)
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                return await self.execute(input, workspace_dir=workspace_dir, on_log=on_log, **kwargs)
+            except TRANSIENT as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait = backoff_base ** attempt
+                    if on_log:
+                        await on_log(f"\n⚠️ {self.name}: transient error ({e.__class__.__name__}), retrying in {wait:.0f}s (attempt {attempt + 1}/{max_retries})...\n")
+                    await asyncio.sleep(wait)
+                else:
+                    # Final attempt failed
+                    return HandResult(
+                        output=f"Failed after {max_retries + 1} attempts: {last_error}",
+                        exit_code=1,
+                    )
+            except Exception:
+                # Permanent error — don't retry
+                raise
+
+        return HandResult(output=f"Failed: {last_error}", exit_code=1)
+
     def __repr__(self):
         return f"<Hand:{self.name} type={self.hand_type}>"
