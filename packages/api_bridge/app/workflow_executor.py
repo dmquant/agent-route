@@ -46,6 +46,7 @@ class WorkflowExecutor:
         workflow: Dict[str, Any],
         session_id: str,
         on_log: Optional[Callable[[str], Any]] = None,
+        input_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute all steps in a workflow sequentially.
 
@@ -54,6 +55,7 @@ class WorkflowExecutor:
             workflow: Full workflow definition (id, name, steps[], config)
             session_id: Session to execute under (shared workspace)
             on_log: Optional callback for streaming log messages
+            input_prompt: Optional user-provided prompt injected into first step
         """
         steps = workflow.get("steps", [])
         if not steps:
@@ -65,11 +67,14 @@ class WorkflowExecutor:
         results: List[Dict[str, Any]] = []
         prev_output = ""
 
-        # Log workflow start as a system message
+        # Log workflow start (include input prompt if provided)
         workflow_name = workflow.get("name", "Untitled Workflow")
+        start_msg = f"▶ Running workflow: **{workflow_name}** ({len(steps)} steps)"
+        if input_prompt:
+            start_msg += f"\n\n**Input:** {input_prompt[:500]}"
         add_message(
             session_id, source='user',
-            content=f"▶ Running workflow: **{workflow_name}** ({len(steps)} steps)",
+            content=start_msg,
             agent_type='workflow',
         )
         session_events.emit_event(
@@ -80,6 +85,7 @@ class WorkflowExecutor:
                 "workflow_name": workflow_name,
                 "total_steps": len(steps),
                 "run_id": run_id,
+                "has_input_prompt": bool(input_prompt),
             },
         )
 
@@ -99,9 +105,10 @@ class WorkflowExecutor:
                 agent = step.get("agent", "gemini")
                 prompt = step.get("prompt", "")
                 skills = step.get("skills", [])
-                input_files = step.get("inputFiles", [])
+                # Accept both camelCase (UI) and snake_case (API) naming
+                input_files = step.get("inputFiles") or step.get("input_files") or []
                 step_config = step.get("config", {})
-                step_name = step.get("name") or f"Step {i + 1}"
+                step_name = step.get("name") or step_id or f"Step {i + 1}"
 
                 if on_log:
                     await on_log(f"\n═══ Step {i + 1}/{len(steps)}: {step_name} ({agent}) ═══\n")
@@ -117,6 +124,7 @@ class WorkflowExecutor:
                     input_files=input_files,
                     workspace=workspace,
                     step_index=i,
+                    input_prompt=input_prompt if i == 0 else None,  # inject only on first step
                 )
 
                 # ─── Log user message for this step ─────
@@ -395,9 +403,18 @@ class WorkflowExecutor:
         input_files: List[str],
         workspace: str,
         step_index: int,
+        input_prompt: Optional[str] = None,
     ) -> str:
         """Build the effective prompt for a step with context injection."""
         parts = []
+
+        # Inject user-provided input prompt (first step only)
+        if input_prompt:
+            parts.append(
+                f"## User Input\n"
+                f"{input_prompt}\n\n"
+                f"---\n"
+            )
 
         # Inject previous step output as context (if not first step)
         if step_index > 0 and prev_output:
@@ -456,10 +473,11 @@ class WorkflowExecutor:
         workflow: Dict[str, Any],
         session_id: str,
         on_log: Optional[Callable[[str], Any]] = None,
+        input_prompt: Optional[str] = None,
     ) -> asyncio.Task:
         """Start a workflow execution as a background task."""
         task = asyncio.create_task(
-            self.execute_workflow(run_id, workflow, session_id, on_log)
+            self.execute_workflow(run_id, workflow, session_id, on_log, input_prompt=input_prompt)
         )
         self._running[run_id] = task
 

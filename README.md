@@ -1,6 +1,6 @@
 # Agent Route — Managed AI Agent Workspace
 
-[English](#english) | [简体中文](#简体中文) | [API Docs →](docs/api-reference.md) | [Architecture →](docs/architecture.md) | [How-To Guide →](docs/how-to-guide.md)
+[English](#english) | [简体中文](#简体中文) | [API Docs →](docs/api-reference.md) | [Architecture →](docs/architecture.md) | [How-To Guide →](docs/how-to-guide.md) | [Workflow Guide →](docs/workflow-guide.md)
 
 ---
 
@@ -18,7 +18,7 @@ Built on **Python FastAPI** (backend) and **React + Vite** (frontend), the syste
 | **Uniform Hand Protocol** | 5 `Hand` implementations behind a shared `execute()` interface — swap agents without code changes |
 | **Background Execution** | Sessions run as `asyncio.Task`s — switching sessions or disconnecting never kills running agents |
 | **Multi-Agent Delegation** | Fan-out prompts to N agents in parallel, join with strategies: `first_success`, `best_effort`, `majority_vote`, `all` |
-| **Workflow Engine** | Drag-and-drop workflow builder with step sequencing, agent selection, skill enablement, and session-bound execution |
+| **Workflow Engine** | Drag-and-drop workflow builder with step sequencing, agent selection, parameterized runs (input prompt + files), and session-bound execution |
 | **Cross-Session Context** | Link, fork, and share context between sessions — linked messages auto-inject into the context window |
 | **Live Observability** | Real-time execution phases (connecting → executing → streaming → finalizing) with elapsed time and output metrics |
 | **Brain Inspector** | Premium dashboard for session event streams, context utilization, and harness configurations |
@@ -81,10 +81,11 @@ Built on **Python FastAPI** (backend) and **React + Vite** (frontend), the syste
 agent-route/
 ├── init.sh / start.sh / stop.sh    # Service lifecycle
 ├── .env.example                    # Configuration template
-├── docs/                           # ← NEW: Full documentation
+├── docs/                           # ← Full documentation
 │   ├── architecture.md             # System architecture deep-dive
 │   ├── api-reference.md            # Complete API reference (70+ endpoints)
-│   └── how-to-guide.md             # Practical examples & recipes
+│   ├── how-to-guide.md             # Practical examples & recipes
+│   └── workflow-guide.md           # Workflow API: schema, templates, best practices
 ├── vibelog/                        # Daily engineering reports (EN + ZH)
 ├── packages/
 │   ├── frontend/                   # React + Vite dashboard
@@ -182,6 +183,7 @@ npm run dev:frontend
 | **[Architecture Guide](docs/architecture.md)** | Deep-dive into all subsystems: Hand Protocol, Brain/Orchestrator, Context Engine, Workflow Engine, Session Event Log |
 | **[API Reference](docs/api-reference.md)** | Complete reference for 70+ REST endpoints and WebSocket protocol, with request/response schemas |
 | **[How-To Guide](docs/how-to-guide.md)** | Practical recipes: run your first agent, build workflows, share context, fork sessions, use multi-agent delegation |
+| **[Workflow Guide](docs/workflow-guide.md)** | Workflow API deep-dive: step schema, parameterized runs (input_prompt + files), templates, and best practices |
 
 ---
 
@@ -199,7 +201,7 @@ npm run dev:frontend
 | **统一 Hand 协议** | 5 个 `Hand` 实现共享 `execute()` 接口 — 无需改代码即可切换智能体 |
 | **后台执行** | 会话作为 `asyncio.Task` 运行 — 切换会话或断开连接不会终止正在运行的智能体 |
 | **多智能体委派** | 将提示词扇出到 N 个智能体并行执行，支持四种合并策略 |
-| **工作流引擎** | 拖拽式工作流构建器，支持步骤排序、智能体选择、技能启用和会话绑定执行 |
+| **工作流引擎** | 拖拽式工作流构建器，支持步骤排序、智能体选择、参数化运行（输入提示 + 文件）和会话绑定执行 |
 | **跨会话上下文** | 链接、分叉和共享会话上下文 — 链接消息自动注入上下文窗口 |
 | **实时可观测性** | 实时执行阶段 + 耗时和输出指标 |
 | **大脑检查器** | 高级仪表板，展示会话事件流、上下文利用率和 Harness 配置 |
@@ -225,3 +227,4 @@ cd agent-route
 | **[架构指南](docs/architecture.md)** | 所有子系统详解：Hand 协议、Brain 编排器、上下文引擎、工作流引擎、会话事件日志 |
 | **[API 参考](docs/api-reference.md)** | 70+ REST 端点和 WebSocket 协议完整参考，含请求/响应格式 |
 | **[使用指南](docs/how-to-guide.md)** | 实用示例：运行智能体、构建工作流、共享上下文、分叉会话、多智能体委派 |
+| **[工作流指南](docs/workflow-guide.md)** | 工作流 API 详解：步骤结构定义、参数化运行（输入提示 + 文件）、模板和最佳实践 |

@@ -208,13 +208,16 @@ export function SessionPanel({ state, isOpen, onToggle, runningSessions = new Se
 
           return (
             <div key={project.id} className="mb-1">
-              <button
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => toggleProject(project.id)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setContextMenu({ type: 'project', id: project.id, x: e.clientX, y: e.clientY });
                 }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors group"
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleProject(project.id); } }}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors group cursor-pointer"
               >
                 {isExpanded ? (
                   <ChevronDown className="w-3 h-3 shrink-0" />
@@ -230,7 +233,7 @@ export function SessionPanel({ state, isOpen, onToggle, runningSessions = new Se
                 >
                   <Plus className="w-3 h-3" />
                 </button>
-              </button>
+              </div>
 
               {isExpanded && projectSessions.map(session => (
                 <SessionRow

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, ArrowRight, GitMerge, Play, Save, Trash2, GripVertical,
   Sparkles, Brain, Code, Server, Image, ChevronDown, ChevronRight as ChevronRightIcon,
@@ -352,19 +352,43 @@ function StepCard({
 }
 
 // ─── Run Modal ──────────────────────
+interface RunInput {
+  sessionId: string | null;
+  title: string;
+  inputPrompt: string;
+  inputFiles: { filename: string; content_text: string }[];
+}
+
 function RunModal({ workflow, sessions, onRun, onClose }: {
   workflow: Workflow;
   sessions: SessionInfo[];
-  onRun: (sessionId: string | null, title: string) => void;
+  onRun: (input: RunInput) => void;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<'new' | 'existing'>('new');
   const [selectedSession, setSelectedSession] = useState('');
   const [title, setTitle] = useState(`Workflow: ${workflow.name}`);
+  const [inputPrompt, setInputPrompt] = useState('');
+  const [inputFiles, setInputFiles] = useState<{ filename: string; content_text: string }[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files) {
+      const text = await file.text();
+      setInputFiles(prev => [...prev, { filename: file.name, content_text: text }]);
+    }
+    // Reset the input so the same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeFile = (idx: number) => {
+    setInputFiles(prev => prev.filter((_, i) => i !== idx));
+  };
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
         <h3 className="text-lg font-bold flex items-center gap-2">
           <Play className="w-5 h-5 text-green-400" />
           Run Workflow
@@ -416,10 +440,63 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
           </div>
         )}
 
+        {/* Input Prompt */}
+        <div>
+          <label className="text-xs text-muted-foreground font-medium block mb-1">
+            <Zap className="w-3 h-3 inline mr-1" />
+            Input Prompt <span className="text-muted-foreground/50">(optional — injected into first step)</span>
+          </label>
+          <textarea
+            value={inputPrompt}
+            onChange={e => setInputPrompt(e.target.value)}
+            placeholder="e.g. Analyze NVDA instead of AAPL, focus on AI datacenter revenue..."
+            rows={3}
+            className="w-full bg-background/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-indigo-500/50 resize-y font-mono"
+          />
+        </div>
+
+        {/* Input Files */}
+        <div>
+          <label className="text-xs text-muted-foreground font-medium block mb-1">
+            <FileText className="w-3 h-3 inline mr-1" />
+            Input Files <span className="text-muted-foreground/50">(optional — uploaded to workspace)</span>
+          </label>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {inputFiles.map((f, i) => (
+              <span key={i} className="flex items-center gap-1 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-md text-xs text-foreground">
+                <FileText className="w-3 h-3 text-indigo-400" />
+                {f.filename}
+                <span className="text-[10px] text-muted-foreground">({(f.content_text.length / 1024).toFixed(1)}KB)</span>
+                <button onClick={() => removeFile(i)} className="ml-0.5 text-muted-foreground hover:text-red-400 transition-colors">
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileSelect}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed border-border/50 text-xs text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+          >
+            <Plus className="w-3 h-3" /> Add Files
+          </button>
+        </div>
+
         <div className="flex gap-2 pt-2">
           <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-border/50 text-sm text-muted-foreground hover:text-foreground transition-colors">Cancel</button>
           <button
-            onClick={() => onRun(mode === 'existing' ? selectedSession : null, title)}
+            onClick={() => onRun({
+              sessionId: mode === 'existing' ? selectedSession : null,
+              title,
+              inputPrompt,
+              inputFiles,
+            })}
             disabled={mode === 'existing' && !selectedSession}
             className="flex-1 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
           >
@@ -512,10 +589,25 @@ export function Workflows() {
   }, [activeRun?.id, activeRun?.status]);
 
   // ─── Editor Helpers ──────────────────────
+  const normalizeStep = (s: any): WorkflowStep => ({
+    id: s.id || crypto.randomUUID(),
+    name: s.name || s.id || '',
+    agent: s.agent || 'gemini',
+    prompt: s.prompt || '',
+    skills: Array.isArray(s.skills) ? s.skills : [],
+    // API uses snake_case 'input_files', UI uses camelCase 'inputFiles'
+    inputFiles: Array.isArray(s.inputFiles) ? s.inputFiles
+      : Array.isArray(s.input_files) ? s.input_files : [],
+    config: {
+      timeout: s.config?.timeout ?? s.timeout ?? 3600,
+      continue_on_error: s.config?.continue_on_error ?? false,
+    },
+  });
+
   const openEditor = (wf?: Workflow) => {
     if (wf) {
       setEditing(wf);
-      setSteps(wf.steps.map(s => ({ ...s })));
+      setSteps(wf.steps.map(normalizeStep));
       setWfName(wf.name);
       setWfDesc(wf.description);
     } else {
@@ -626,7 +718,7 @@ export function Workflows() {
   };
 
   // ─── Run ──────────────────────
-  const startRun = async (sessionId: string | null, title: string) => {
+  const startRun = async (input: RunInput) => {
     // Use runModal workflow (from list view) or editing workflow (from editor)
     const workflowId = runModal?.id || editing?.id;
     if (!workflowId) {
@@ -643,8 +735,10 @@ export function Workflows() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: sessionId || undefined,
-          session_title: title,
+          session_id: input.sessionId || undefined,
+          session_title: input.title,
+          input_prompt: input.inputPrompt || undefined,
+          input_files: input.inputFiles.length > 0 ? input.inputFiles : undefined,
         }),
       });
       const data = await res.json();

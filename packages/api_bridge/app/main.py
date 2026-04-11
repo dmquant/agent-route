@@ -4,7 +4,7 @@ import uuid
 import asyncio
 import time as _time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 
 # Boot Environment Configurations BEFORE importing modules that depend on env vars
@@ -685,9 +685,17 @@ class WorkflowUpdateRequest(BaseModel):
     config: Optional[dict] = None
 
 
+class WorkflowInputFile(BaseModel):
+    filename: str
+    content_b64: Optional[str] = None  # base64-encoded file content
+    content_text: Optional[str] = None  # plain text content (alternative to b64)
+
+
 class WorkflowRunRequest(BaseModel):
     session_id: Optional[str] = None
     session_title: Optional[str] = None
+    input_prompt: Optional[str] = None  # Additional prompt injected into first step
+    input_files: Optional[List[WorkflowInputFile]] = None  # Files written to workspace before run
 
 
 @app.get("/api/workflows")
@@ -738,7 +746,11 @@ def api_delete_workflow(workflow_id: str):
 
 @app.post("/api/workflows/{workflow_id}/run")
 async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
-    """Start a workflow execution. Creates or reuses a session."""
+    """Start a workflow execution. Creates or reuses a session.
+
+    Accepts optional input_prompt (injected into first step) and
+    input_files (written to session workspace before execution).
+    """
     wf = get_workflow(workflow_id)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -753,12 +765,18 @@ async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
         session = create_session(title=title, agent_type="workflow")
         session_id = session["id"]
 
+    # Write input files to workspace before execution
+    if req.input_files:
+        workspace = get_session_workspace(session_id)
+        _write_input_files(workspace, req.input_files)
+
     run = create_run(workflow_id=workflow_id, session_id=session_id)
 
     await workflow_executor.start_workflow(
         run_id=run["id"],
         workflow=wf,
         session_id=session_id,
+        input_prompt=req.input_prompt,
     )
 
     return {
@@ -792,6 +810,24 @@ def api_cancel_run(run_id: str):
 
 class SessionWorkflowRunRequest(BaseModel):
     workflow_id: str
+    input_prompt: Optional[str] = None
+    input_files: Optional[List[WorkflowInputFile]] = None
+
+
+def _write_input_files(workspace: str, files: List[WorkflowInputFile]):
+    """Write input files to the session workspace."""
+    import base64
+    os.makedirs(workspace, exist_ok=True)
+    for f in files:
+        filepath = os.path.join(workspace, f.filename)
+        # Ensure subdirectories exist
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) != '' else workspace, exist_ok=True)
+        if f.content_b64:
+            with open(filepath, "wb") as fh:
+                fh.write(base64.b64decode(f.content_b64))
+        elif f.content_text:
+            with open(filepath, "w", encoding="utf-8") as fh:
+                fh.write(f.content_text)
 
 
 @app.post("/api/sessions/{session_id}/run-workflow")
@@ -800,6 +836,7 @@ async def api_run_workflow_in_session(session_id: str, req: SessionWorkflowRunRe
     
     This allows the Chat/Workspace interface to trigger workflow execution
     using the same session context, workspace, and message history.
+    Accepts optional input_prompt and input_files.
     """
     session = get_session(session_id)
     if not session:
@@ -809,12 +846,18 @@ async def api_run_workflow_in_session(session_id: str, req: SessionWorkflowRunRe
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    # Write input files to workspace before execution
+    if req.input_files:
+        workspace = get_session_workspace(session_id)
+        _write_input_files(workspace, req.input_files)
+
     run = create_run(workflow_id=req.workflow_id, session_id=session_id)
 
     await workflow_executor.start_workflow(
         run_id=run["id"],
         workflow=wf,
         session_id=session_id,
+        input_prompt=req.input_prompt,
     )
 
     return {

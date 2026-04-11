@@ -192,7 +192,16 @@ export function useWebSocket(options: WebSocketOptions): WebSocketHookReturn {
       if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
-        wsRef.current.close();
+        wsRef.current.onerror = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onopen = null;
+        // Only close if not already closed/closing — avoids
+        // "WebSocket is closed before the connection is established" warning
+        if (wsRef.current.readyState === WebSocket.OPEN ||
+            wsRef.current.readyState === WebSocket.CONNECTING) {
+          wsRef.current.close();
+        }
+        wsRef.current = null;
       }
     };
   }, []);  // Only run once — connect() is stable enough
