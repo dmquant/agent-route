@@ -4,11 +4,13 @@ import {
   PanelRight, PanelRightClose, FolderOpen,
   Loader2, Wifi, WifiOff, Zap, Clock, Radio,
   Users, ChevronDown, ChevronRight, Trophy, AlertCircle, CheckCircle2,
+  GitMerge, Play, Link2, GitFork, X,
 } from 'lucide-react';
 import { OutputParser } from '../components/OutputParser';
 import { SessionPanel } from '../components/SessionPanel';
 import { WorkspacePanel } from '../components/WorkspacePanel';
 import { useSessionState } from '../hooks/useSessionState';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 
 type AgentMode = 'gemini' | 'claude' | 'codex' | 'ollama' | 'mflux';
@@ -235,7 +237,6 @@ export function Chat() {
   const [activeMode, setActiveMode] = useState<AgentMode>('gemini');
   const [input, setInput] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [showSessionPanel, setShowSessionPanel] = useState(true);
@@ -246,10 +247,191 @@ export function Chat() {
   const [isMultiAgent, setIsMultiAgent] = useState(false);
   const [selectedAgents, setSelectedAgents] = useState<Set<AgentMode>>(new Set(['gemini']));
   const [multiStrategy, setMultiStrategy] = useState<string>('first_success');
-  const wsRef = useRef<WebSocket | null>(null);
+  // Workflow execution in session
+  const [workflows, setWorkflows] = useState<{id: string; name: string; steps: any[]}[]>([]);
+  const [showWorkflowMenu, setShowWorkflowMenu] = useState(false);
+  const [workflowRunning, setWorkflowRunning] = useState<string | null>(null);
+  // Context sharing
+  const [contextLinks, setContextLinks] = useState<{outgoing: any[]; incoming: any[]}>({outgoing: [], incoming: []});
+  const [showLinkPanel, setShowLinkPanel] = useState(false);
+  const [linkTargetId, setLinkTargetId] = useState('');
+
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const sessionState = useSessionState();
+
+  const addLog = useCallback((source: LogEntry['source'], content: string) => {
+    setLogs(prev => [...prev, {
+      id: Math.random().toString(36).substring(7),
+      source,
+      content,
+      timestamp: Date.now(),
+    }]);
+  }, []);
+
+  // ─── Resilient WebSocket via hook ────
+  const sessionStateRef = useRef(sessionState);
+  useEffect(() => { sessionStateRef.current = sessionState; }, [sessionState]);
+
+  const handleWsMessage = useCallback((data: any) => {
+    const ss = sessionStateRef.current;
+
+    // ─── Running tasks query response ─────
+    if (data.type === 'running_tasks') {
+      setRunningTasks(data.tasks.filter(
+        (t: RunningTask) => !['completed', 'failed'].includes(t.phase)
+      ));
+      return;
+    }
+
+    // ─── Task status updates (from background tasks) ─────
+    if (data.type === 'task_status') {
+      setRunningTasks(prev => {
+        const exists = prev.findIndex(t => t.task_id === data.task_id);
+        const isTerminal = ['completed', 'failed'].includes(data.phase);
+
+        if (isTerminal) {
+          return prev.filter(t => t.task_id !== data.task_id);
+        }
+
+        const updated: RunningTask = {
+          task_id: data.task_id,
+          session_id: data.session_id,
+          agent: data.agent,
+          prompt: data.prompt,
+          phase: data.phase,
+          elapsed_ms: data.elapsed_ms,
+          output_chunks: data.output_chunks,
+          output_bytes: data.output_bytes,
+        };
+
+        if (exists >= 0) {
+          const next = [...prev];
+          next[exists] = updated;
+          return next;
+        }
+        return [...prev, updated];
+      });
+
+      // Show phase transitions as system messages for the active session
+      if (data.session_id === ss.activeSessionId) {
+        const phase = PHASE_STYLES[data.phase];
+        if (phase && !['completed', 'failed'].includes(data.phase)) {
+          if (['connecting', 'streaming', 'finalizing'].includes(data.phase)) {
+            addLog('system', `⚡ ${data.agent}: ${phase.label} (${formatElapsed(data.elapsed_ms)})`);
+          }
+        }
+      }
+      return;
+    }
+
+    // ─── Filter events for the active session ─────
+    const eventSessionId = data.sessionId;
+
+    if (data.type === 'node_execution_started') {
+      if (eventSessionId === ss.activeSessionId) {
+        addLog('system', `🏁 Execution initiated for: ${data.agent || data.nodeId}`);
+      }
+    } else if (data.type === 'node_execution_log') {
+      if (eventSessionId === ss.activeSessionId) {
+        setLogs(prev => {
+          const source = data.source || 'agent';
+          const log = data.log || '';
+
+          if (prev.length > 0 && prev[prev.length - 1].source === source) {
+            const newLogs = [...prev];
+            const lastContent = newLogs[newLogs.length - 1].content;
+            newLogs[newLogs.length - 1] = {
+              ...newLogs[newLogs.length - 1],
+              content: lastContent + '\n' + log,
+            };
+            return newLogs;
+          } else {
+            return [...prev, {
+              id: Math.random().toString(36).substring(7),
+              source,
+              content: log,
+              timestamp: Date.now(),
+              sessionId: eventSessionId,
+            }];
+          }
+        });
+      }
+    } else if (data.type === 'node_execution_image') {
+      if (eventSessionId === ss.activeSessionId) {
+        setLogs(prev => [...prev, {
+          id: Math.random().toString(36).substring(7),
+          source: 'agent',
+          content: '[✨ MFLUX Visual Renderer: Graphic Finalized]',
+          imageB64: data.b64,
+          timestamp: Date.now(),
+          sessionId: eventSessionId,
+        }]);
+      }
+    } else if (data.type === 'node_execution_completed') {
+      if (eventSessionId === ss.activeSessionId) {
+        addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
+        ss.refreshCurrentSession();
+        setWorkspaceKey(k => k + 1);
+      }
+    // ─── Multi-agent events ─────
+    } else if (data.type === 'multi_agent_started') {
+      if (data.sessionId === ss.activeSessionId) {
+        addLog('system', `🚀 Multi-Agent Fan-Out: ${data.agents?.join(', ')} (strategy: ${data.strategy})`);
+      }
+    } else if (data.type === 'multi_agent_completed') {
+      if (data.sessionId === ss.activeSessionId) {
+        const structuredResults: MultiAgentResult[] = (data.all_results || []).map(
+          (r: { agent: string; success: boolean; exit_code: number; output?: string }) => ({
+            agent: r.agent,
+            success: r.success,
+            exit_code: r.exit_code,
+            output: r.output || '',
+            isWinner: data.selected_agent === r.agent,
+          })
+        );
+
+        setLogs(prev => [...prev, {
+          id: Math.random().toString(36).substring(7),
+          source: 'system' as const,
+          content: `🏁 Multi-Agent Complete (${data.strategy})`,
+          timestamp: Date.now(),
+          sessionId: data.sessionId,
+          multiAgentResults: structuredResults,
+          multiStrategy: data.strategy,
+        }]);
+
+        ss.refreshCurrentSession();
+        setWorkspaceKey(k => k + 1);
+      }
+    } else if (data.type === 'multi_agent_error') {
+      if (data.sessionId === ss.activeSessionId) {
+        addLog('system', `❌ Multi-Agent Error: ${data.error}`);
+      }
+    } else if (data.content) {
+      if (!eventSessionId || eventSessionId === ss.activeSessionId) {
+        addLog(data.source || 'agent', data.content);
+      }
+    }
+  }, [addLog]);
+
+  const handleWsStateChange = useCallback((wsState: import('../hooks/useWebSocket').ConnectionState) => {
+    if (wsState === 'connected') {
+      addLog('system', '🔌 Connected to Agent Route Service via Session Router.');
+    } else if (wsState === 'disconnected') {
+      addLog('system', '⚡ Connection lost. Auto-reconnecting...');
+    }
+  }, [addLog]);
+
+  const ws = useWebSocket({
+    url: 'ws://localhost:8000/ws/agent',
+    onMessage: handleWsMessage,
+    onStateChange: handleWsStateChange,
+    maxReconnectDelay: 30000,
+    heartbeatInterval: 20000,
+  });
+
+  const isConnected = ws.state === 'connected';
 
   const scrollToBottom = () => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -288,211 +470,92 @@ export function Chat() {
       .catch(err => console.error("Could not discover Ollama models from backend:", err));
   }, []);
 
-  // ─── Poll running tasks status ────
-  const pollRunningTasks = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'query_running' }));
+  // Fetch saved workflows
+  useEffect(() => {
+    fetch('http://localhost:8000/api/workflows')
+      .then(r => r.json())
+      .then(data => setWorkflows(data.workflows || []))
+      .catch(() => {});
+  }, []);
+
+  // Fetch context links for current session
+  const fetchContextLinks = useCallback(() => {
+    if (!sessionState.activeSessionId) {
+      setContextLinks({outgoing: [], incoming: []});
+      return;
     }
-  }, []);
+    fetch(`http://localhost:8000/api/sessions/${sessionState.activeSessionId}/context-links`)
+      .then(r => r.json())
+      .then(data => setContextLinks(data))
+      .catch(() => {});
+  }, [sessionState.activeSessionId]);
 
   useEffect(() => {
-    const interval = setInterval(pollRunningTasks, 1500);
-    return () => clearInterval(interval);
-  }, [pollRunningTasks]);
+    fetchContextLinks();
+  }, [fetchContextLinks]);
 
-  // ─── WebSocket with background task awareness ────
-  useEffect(() => {
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let isUnmounted = false;
+  const linkSession = async () => {
+    if (!sessionState.activeSessionId || !linkTargetId.trim()) return;
+    await fetch(`http://localhost:8000/api/sessions/${sessionState.activeSessionId}/context-links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_session_id: linkTargetId.trim(), link_type: 'reference' }),
+    });
+    setLinkTargetId('');
+    fetchContextLinks();
+    addLog('system', `🔗 Linked session context from ${linkTargetId.slice(0, 8)}…`);
+  };
 
-    const connect = () => {
-      const socket = new WebSocket('ws://localhost:8000/ws/agent');
-      
-      socket.onopen = () => {
-        if (isUnmounted) return;
-        setIsConnected(true);
-        addLog('system', 'Connected to Agent Route Service via Session Router.');
-        // Query for any already-running tasks
-        socket.send(JSON.stringify({ type: 'query_running' }));
-      };
-      
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
+  const unlinkSession = async (linkId: string) => {
+    await fetch(`http://localhost:8000/api/context-links/${linkId}`, { method: 'DELETE' });
+    fetchContextLinks();
+    addLog('system', '🔓 Removed context link');
+  };
 
-          // ─── Running tasks query response ─────
-          if (data.type === 'running_tasks') {
-            setRunningTasks(data.tasks.filter(
-              (t: RunningTask) => !['completed', 'failed'].includes(t.phase)
-            ));
-            return;
-          }
+  const forkCurrentSession = async () => {
+    if (!sessionState.activeSessionId) return;
+    const res = await fetch(`http://localhost:8000/api/sessions/${sessionState.activeSessionId}/fork`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ copy_messages: 10 }),
+    });
+    const data = await res.json();
+    if (data.id) {
+      addLog('system', `🍴 Forked to new session: ${data.title}`);
+      await sessionState.loadSessions(sessionState.activeProjectId);
+      sessionState.selectSession(data.id);
+    }
+  };
 
-          // ─── Task status updates (from background tasks) ─────
-          if (data.type === 'task_status') {
-            setRunningTasks(prev => {
-              const exists = prev.findIndex(t => t.task_id === data.task_id);
-              const isTerminal = ['completed', 'failed'].includes(data.phase);
-
-              if (isTerminal) {
-                // Remove completed task
-                return prev.filter(t => t.task_id !== data.task_id);
-              }
-
-              const updated: RunningTask = {
-                task_id: data.task_id,
-                session_id: data.session_id,
-                agent: data.agent,
-                prompt: data.prompt,
-                phase: data.phase,
-                elapsed_ms: data.elapsed_ms,
-                output_chunks: data.output_chunks,
-                output_bytes: data.output_bytes,
-              };
-
-              if (exists >= 0) {
-                const next = [...prev];
-                next[exists] = updated;
-                return next;
-              }
-              return [...prev, updated];
-            });
-
-            // Show phase transitions as system messages for the active session
-            if (data.session_id === sessionState.activeSessionId) {
-              const phase = PHASE_STYLES[data.phase];
-              if (phase && !['completed', 'failed'].includes(data.phase)) {
-                // Don't spam logs with every phase, only key ones
-                if (['connecting', 'streaming', 'finalizing'].includes(data.phase)) {
-                  addLog('system', `⚡ ${data.agent}: ${phase.label} (${formatElapsed(data.elapsed_ms)})`);
-                }
-              }
-            }
-            return;
-          }
-
-          // ─── Filter events for the active session ─────
-          const eventSessionId = data.sessionId;
-
-          if (data.type === 'node_execution_started') {
-            if (eventSessionId === sessionState.activeSessionId) {
-              addLog('system', `🏁 Execution initiated for: ${data.agent || data.nodeId}`);
-            }
-          } else if (data.type === 'node_execution_log') {
-            // Only show logs for active session
-            if (eventSessionId === sessionState.activeSessionId) {
-              setLogs(prev => {
-                const source = data.source || 'agent';
-                if (prev.length > 0 && prev[prev.length - 1].source === source) {
-                  const newLogs = [...prev];
-                  newLogs[newLogs.length - 1] = {
-                    ...newLogs[newLogs.length - 1],
-                    content: newLogs[newLogs.length - 1].content + data.log
-                  };
-                  return newLogs;
-                } else {
-                  return [...prev, {
-                    id: Math.random().toString(36).substring(7),
-                    source,
-                    content: data.log,
-                    timestamp: Date.now(),
-                    sessionId: eventSessionId,
-                  }];
-                }
-              });
-            }
-          } else if (data.type === 'node_execution_image') {
-            if (eventSessionId === sessionState.activeSessionId) {
-              setLogs(prev => [...prev, {
-                id: Math.random().toString(36).substring(7),
-                source: 'agent',
-                content: '[✨ MFLUX Visual Renderer: Graphic Finalized]',
-                imageB64: data.b64,
-                timestamp: Date.now(),
-                sessionId: eventSessionId,
-              }]);
-            }
-          } else if (data.type === 'node_execution_completed') {
-            if (eventSessionId === sessionState.activeSessionId) {
-              addLog('system', `✅ Output Complete (Exit: ${data.exitCode})`);
-              sessionState.refreshCurrentSession();
-              setWorkspaceKey(k => k + 1);
-            }
-          // ─── Multi-agent events ─────
-          } else if (data.type === 'multi_agent_started') {
-            if (data.sessionId === sessionState.activeSessionId) {
-              addLog('system', `🚀 Multi-Agent Fan-Out: ${data.agents?.join(', ')} (strategy: ${data.strategy})`);
-            }
-          } else if (data.type === 'multi_agent_completed') {
-            if (data.sessionId === sessionState.activeSessionId) {
-              // Build structured results for comparison UI
-              const structuredResults: MultiAgentResult[] = (data.all_results || []).map(
-                (r: { agent: string; success: boolean; exit_code: number; output?: string }) => ({
-                  agent: r.agent,
-                  success: r.success,
-                  exit_code: r.exit_code,
-                  output: r.output || '',
-                  isWinner: data.selected_agent === r.agent,
-                })
-              );
-
-              // Add comparison card as a special log entry
-              setLogs(prev => [...prev, {
-                id: Math.random().toString(36).substring(7),
-                source: 'system' as const,
-                content: `🏁 Multi-Agent Complete (${data.strategy})`,
-                timestamp: Date.now(),
-                sessionId: data.sessionId,
-                multiAgentResults: structuredResults,
-                multiStrategy: data.strategy,
-              }]);
-
-              sessionState.refreshCurrentSession();
-              setWorkspaceKey(k => k + 1);
-            }
-          } else if (data.type === 'multi_agent_error') {
-            if (data.sessionId === sessionState.activeSessionId) {
-              addLog('system', `❌ Multi-Agent Error: ${data.error}`);
-            }
-          } else if (data.content) {
-            if (!eventSessionId || eventSessionId === sessionState.activeSessionId) {
-              addLog(data.source || 'agent', data.content);
-            }
-          }
-        } catch (e) {
-          addLog('agent', event.data);
-        }
-      };
-      
-      socket.onclose = () => {
-        setIsConnected(false);
-        if (!isUnmounted) {
-          addLog('system', 'Disconnected. Reconnecting in 3s...');
-          reconnectTimeout = setTimeout(connect, 3000);
-        }
-      };
-      wsRef.current = socket;
-    };
-
-    connect();
-
-    return () => {
-      isUnmounted = true;
-      clearTimeout(reconnectTimeout);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
+  // Run a workflow in the current session
+  const runWorkflowInSession = async (workflowId: string) => {
+    setShowWorkflowMenu(false);
+    let currentSessionId = sessionState.activeSessionId;
+    if (!currentSessionId) {
+      const session = await sessionState.createSession({
+        projectId: sessionState.activeProjectId,
+        agentType: 'workflow',
+      });
+      currentSessionId = session.id;
+    }
+    const wf = workflows.find(w => w.id === workflowId);
+    addLog('system', `▶ Starting workflow: ${wf?.name || workflowId} (${wf?.steps?.length || 0} steps)`);
+    setWorkflowRunning(workflowId);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${currentSessionId}/run-workflow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow_id: workflowId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        addLog('system', `❌ Failed to start workflow: ${data.detail || 'Unknown error'}`);
       }
-    };
-  }, []);
-
-  const addLog = (source: LogEntry['source'], content: string) => {
-    setLogs(prev => [...prev, {
-      id: Math.random().toString(36).substring(7),
-      source,
-      content,
-      timestamp: Date.now(),
-    }]);
+    } catch (e: any) {
+      addLog('system', `❌ Failed to start workflow: ${e.message}`);
+    }
+    // Don't clear workflowRunning here — it clears when the task completes via WS
+    setTimeout(() => setWorkflowRunning(null), 5000);
   };
 
   const toggleAgent = (agent: AgentMode) => {
@@ -522,30 +585,29 @@ export function Chat() {
 
     addLog('user', input);
     
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (isConnected) {
       if (isMultiAgent && selectedAgents.size > 1) {
-        // Multi-agent fan-out mode
-        wsRef.current.send(JSON.stringify({
+        ws.send({
           type: 'multi_agent_run',
           agents: Array.from(selectedAgents),
           prompt: input,
           sessionId: currentSessionId,
           strategy: multiStrategy,
           timeout: 300,
-        }));
+        });
       } else {
-        // Single agent mode
-        wsRef.current.send(JSON.stringify({
+        ws.send({
           type: 'execute_node',
           client: activeMode,
           prompt: input,
           model: activeMode === 'ollama' ? selectedModel : undefined,
           nodeId: `ui_node_${Date.now()}`,
           sessionId: currentSessionId,
-        }));
+        });
       }
     } else {
-      addLog('system', 'Error: WebSocket is not connected.');
+      addLog('system', 'Error: WebSocket is not connected. Reconnecting...');
+      ws.forceReconnect();
     }
     
     setInput('');
@@ -692,12 +754,18 @@ export function Chat() {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <div className="flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full bg-card border border-border/50">
+            <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full bg-card border transition-colors ${
+              isConnected ? 'border-green-500/30' : ws.state === 'reconnecting' ? 'border-amber-500/30' : 'border-red-500/30'
+            }`}>
               {isConnected
                 ? <Wifi className="w-3.5 h-3.5 text-green-400" />
-                : <WifiOff className="w-3.5 h-3.5 text-destructive animate-pulse" />
+                : ws.state === 'reconnecting'
+                  ? <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  : <WifiOff className="w-3.5 h-3.5 text-destructive animate-pulse" />
               }
-              {isConnected ? 'Connected' : 'Reconnecting...'}
+              <span className={isConnected ? 'text-green-400' : ws.state === 'reconnecting' ? 'text-amber-400' : 'text-red-400'}>
+                {isConnected ? 'Connected' : ws.state === 'reconnecting' ? `Retry #${ws.reconnectAttempt}` : 'Disconnected'}
+              </span>
             </div>
             <button
               onClick={() => setShowWorkspacePanel(!showWorkspacePanel)}
@@ -709,10 +777,109 @@ export function Chat() {
                 : <div className="relative"><PanelRight className="w-4 h-4" /><FolderOpen className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 text-amber-400" /></div>}
             </button>
           </div>
+          {/* Context sharing controls */}
+          {sessionState.activeSessionId && (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setShowLinkPanel(!showLinkPanel)}
+                className={`p-1.5 rounded-md transition-colors ${showLinkPanel ? 'bg-violet-500/20 text-violet-400' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+                title="Link sessions for context sharing"
+              >
+                <Link2 className="w-4 h-4" />
+              </button>
+              <button
+                onClick={forkCurrentSession}
+                className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                title="Fork this session"
+              >
+                <GitFork className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </div>
+
+        {/* Link Panel */}
+        {showLinkPanel && sessionState.activeSessionId && (
+          <div className="border-b border-border/30 bg-card/50 px-4 py-3 animate-in slide-in-from-top-2 duration-200">
+            <div className="flex items-center gap-3 max-w-xl">
+              <Link2 className="w-4 h-4 text-violet-400 shrink-0" />
+              <span className="text-xs font-semibold text-violet-300 shrink-0">Link Session</span>
+              <select
+                value={linkTargetId}
+                onChange={(e) => setLinkTargetId(e.target.value)}
+                className="flex-1 bg-card border border-border/60 rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+              >
+                <option value="">Select a session to link...</option>
+                {sessionState.sessions
+                  .filter(s => s.id !== sessionState.activeSessionId)
+                  .map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.title} ({s.agent_type} · {s.message_count || 0} msgs)
+                    </option>
+                  ))}
+              </select>
+              <button
+                onClick={linkSession}
+                disabled={!linkTargetId}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+              >
+                Link
+              </button>
+              <button
+                onClick={() => setShowLinkPanel(false)}
+                className="p-1 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {contextLinks.outgoing.length > 0 && (
+              <div className="mt-2 pl-7 flex flex-wrap gap-2">
+                {contextLinks.outgoing.map(link => (
+                  <div key={link.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-500/8 border border-violet-500/15 text-[11px]">
+                    <span className="text-violet-400/50">
+                      {link.link_type === 'fork' ? '🍴' : link.link_type === 'shared_workspace' ? '📁' : '🔗'}
+                    </span>
+                    <span className="text-violet-300 font-medium">{link.target_title || link.target_session_id?.slice(0, 8)}</span>
+                    <span className="text-violet-400/30">·</span>
+                    <span className="text-violet-400/50">{link.link_type}</span>
+                    <button
+                      onClick={() => unlinkSession(link.id)}
+                      className="ml-1 text-violet-400/30 hover:text-red-400 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Execution Status Bar — shows all running tasks */}
         <ExecutionStatusBar tasks={runningTasks} activeSessionId={sessionState.activeSessionId} />
+
+        {/* Context Links Bar */}
+        {sessionState.activeSessionId && contextLinks.outgoing.length > 0 && (
+          <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border/30 bg-violet-500/5">
+            <Link2 className="w-3 h-3 text-violet-400 shrink-0" />
+            <span className="text-[10px] font-semibold text-violet-300 uppercase tracking-wider shrink-0">Shared Context</span>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {contextLinks.outgoing.map(link => (
+                <div key={link.id} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-500/10 border border-violet-500/20 text-[10px]">
+                  <span className="text-violet-300 font-medium">{link.target_title || link.target_session_id?.slice(0, 8)}</span>
+                  <span className="text-violet-400/50">{link.link_type === 'fork' ? '🍴' : link.link_type === 'shared_workspace' ? '📁' : '🔗'}</span>
+                  <button
+                    onClick={() => unlinkSession(link.id)}
+                    className="ml-0.5 text-violet-400/40 hover:text-red-400 transition-colors"
+                    title="Remove link"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Logs Area */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-5xl mx-auto w-full">
@@ -788,9 +955,48 @@ export function Chat() {
                 }
               }}
               placeholder={isMultiAgent && selectedAgents.size > 1 ? `Fan-out to ${Array.from(selectedAgents).join(', ')}... (${multiStrategy})` : `Instruct ${activeMode}... (Shift+Enter for context)`}
-              className="w-full bg-card border border-border/80 group-focus-within:border-indigo-500/50 rounded-xl pl-4 pr-16 py-4 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans text-sm resize-none shadow-sm min-h-[56px] max-h-48 overflow-y-auto"
+              className="w-full bg-card border border-border/80 group-focus-within:border-indigo-500/50 rounded-xl pl-4 pr-28 py-4 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans text-sm resize-none shadow-sm min-h-[56px] max-h-48 overflow-y-auto"
               rows={1}
             />
+            {/* Workflow trigger button */}
+            <div className="absolute right-14 bottom-2" style={{ zIndex: 10 }}>
+              <button
+                onClick={() => setShowWorkflowMenu(!showWorkflowMenu)}
+                disabled={workflows.length === 0 || !!workflowRunning}
+                className={`p-2.5 rounded-lg transition-all shadow-sm ${
+                  showWorkflowMenu
+                    ? 'bg-emerald-600 text-white'
+                    : workflowRunning
+                      ? 'bg-emerald-600/30 text-emerald-400 animate-pulse'
+                      : 'bg-card border border-border/80 text-muted-foreground hover:bg-emerald-600/20 hover:text-emerald-400 hover:border-emerald-500/40'
+                }`}
+                title={workflows.length === 0 ? 'No saved workflows' : 'Run a workflow in this session'}
+              >
+                <GitMerge className="w-4 h-4" />
+              </button>
+              {showWorkflowMenu && workflows.length > 0 && (
+                <div className="absolute bottom-12 right-0 w-72 bg-card border border-border/60 rounded-xl shadow-2xl py-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                  <div className="px-3 py-1.5 border-b border-border/30">
+                    <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Run Workflow</span>
+                  </div>
+                  {workflows.map(wf => (
+                    <button
+                      key={wf.id}
+                      onClick={() => runWorkflowInSession(wf.id)}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/60 transition-colors group"
+                    >
+                      <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 group-hover:bg-emerald-500/20">
+                        <Play className="w-3 h-3 text-emerald-400" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground truncate">{wf.name}</div>
+                        <div className="text-[11px] text-muted-foreground">{wf.steps?.length || 0} steps</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
               onClick={handleSend}
               disabled={!input.trim()}

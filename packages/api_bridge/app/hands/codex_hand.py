@@ -1,16 +1,26 @@
-"""Codex CLI Hand — OpenAI's Codex agent via npx."""
+"""Codex CLI Hand — OpenAI's Codex agent via npx.
+
+Real-time streaming: reads stdout line-by-line and emits
+structured stream chunks via the CodexStreamProcessor.
+"""
 
 import asyncio
 import os
 import re
+import json
 import shutil
 from typing import Optional, Callable, Any
 
-from app.hands.base import Hand, HandResult, filter_noise
+from app.hands.base import Hand, HandResult, filter_noise, _NOISE_PATTERNS, resolve_cli_path, get_cli_env
+from app.hands.stream_processor import CodexStreamProcessor
 
 
 class CodexHand(Hand):
-    """Codex CLI agent via `npx codex`."""
+    """Codex CLI agent via `npx codex`.
+
+    Streams stdout in real-time with structured chunk types:
+    reasoning blocks, tool calls, and prose text.
+    """
 
     name = "codex"
     hand_type = "cli"
@@ -23,16 +33,21 @@ class CodexHand(Hand):
         on_log: Optional[Callable[[str], Any]] = None,
         **kwargs,
     ) -> HandResult:
-        cmd = "npx"
+        cmd = resolve_cli_path("npx")
         args = ["codex", "exec", "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox", input]
 
         os.makedirs(workspace_dir, exist_ok=True)
         await self._ensure_git(workspace_dir)
 
+        processor = CodexStreamProcessor()
+
         if on_log:
             short_dir = os.path.basename(workspace_dir)[:12]
-            await on_log(f"⚡ Executing with **codex** (workspace: `{short_dir}…`)\n")
+            await on_log(json.dumps({
+                "chunkType": "progress",
+                "content": f"⚡ Executing with **codex** (workspace: `{short_dir}…`)"
+            }))
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -40,26 +55,66 @@ class CodexHand(Hand):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace_dir,
+                env=get_cli_env(),
             )
         except Exception as e:
             msg = f"Failed to spawn codex: {e}"
             if on_log:
-                await on_log(f"❌ {msg}\n")
+                await on_log(json.dumps({"chunkType": "error", "content": msg}))
             return HandResult(output=msg, exit_code=1)
 
-        stdout, stderr = await self._read_output(process)
+        # ── Stream both stdout and stderr line-by-line in real-time ──
+        full_output: list[str] = []
+        skip_banner = True
+
+        async def stream_output(stream, is_stderr=False):
+            nonlocal skip_banner
+            buf = ""
+            while True:
+                chunk = await stream.read(256)
+                if not chunk:
+                    if buf.strip():
+                        full_output.append(buf.strip())
+                        if on_log:
+                            for sc in processor.process_line(buf.strip()):
+                                await on_log(json.dumps(sc.to_event()))
+                    break
+                text = chunk.decode('utf-8', errors='replace')
+                buf += text
+                while '\n' in buf:
+                    line, buf = buf.split('\n', 1)
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    # Filter noise
+                    if any(p.search(line) for p in _NOISE_PATTERNS):
+                        continue
+                    # Skip Codex banner section (user\n...\nassistant\n)
+                    if skip_banner:
+                        if re.match(r'^(user|assistant)$', line.strip()):
+                            if line.strip() == 'assistant':
+                                skip_banner = False
+                            continue
+                        if skip_banner and re.match(r'^[-─]{3,}$', line.strip()):
+                            continue
+
+                    full_output.append(line)
+                    if on_log:
+                        for sc in processor.process_line(line):
+                            await on_log(json.dumps(sc.to_event()))
+
+        await asyncio.gather(
+            stream_output(process.stdout),
+            stream_output(process.stderr, is_stderr=True),
+        )
         exit_code = await process.wait()
 
-        # Codex-specific: filter banner noise + strip echo
-        combined = stdout + stderr
-        output_text = filter_noise(combined)
-        output_text = re.sub(r'^user\n.*?\nassistant\n', '', output_text, flags=re.DOTALL)
-        output_text = output_text.strip()
+        # Flush processor
+        if on_log:
+            for sc in processor.finalize():
+                await on_log(json.dumps(sc.to_event()))
 
-        if output_text and on_log:
-            await on_log(output_text)
-        elif exit_code != 0 and on_log:
-            await on_log(f"Process exited with code {exit_code} (no output captured).")
+        output_text = "\n".join(full_output).strip()
 
         return HandResult(output=output_text or f"Exit code {exit_code}", exit_code=exit_code)
 
@@ -78,19 +133,3 @@ class CodexHand(Hand):
                 await proc.wait()
             except Exception:
                 pass
-
-    async def _read_output(self, process) -> tuple:
-        raw_stdout, raw_stderr = [], []
-
-        async def read_stream(stream, acc):
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
-                    break
-                acc.append(chunk.decode('utf-8', errors='replace'))
-
-        await asyncio.gather(
-            read_stream(process.stdout, raw_stdout),
-            read_stream(process.stderr, raw_stderr),
-        )
-        return ''.join(raw_stdout), ''.join(raw_stderr)

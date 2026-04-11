@@ -3,7 +3,8 @@ import {
   Calendar, BarChart3, Activity, MessageSquare, Zap, AlertTriangle,
   RefreshCw, Sparkles, Brain, Code, Server, ChevronLeft, ChevronRight,
   Clock, TrendingUp, FileText, CheckCircle2, XCircle, Loader2,
-  ArrowRight, Hash, MessagesSquare,
+  ArrowRight, Hash, MessagesSquare, Star, Trash2, BookOpen, Archive,
+  ChevronDown,
 } from 'lucide-react';
 
 const API = 'http://localhost:8000';
@@ -32,6 +33,19 @@ interface DailyStats {
   error_count: number;
   log_stats: { total: number; success: number; error: number; running: number; };
   log_entries: LogEntry[];
+}
+
+interface SavedReport {
+  id: string;
+  date: string;
+  days: number;
+  agent: string;
+  created_at: number;
+  title: string;
+  pinned: boolean;
+  content_length: number;
+  content?: string;
+  stats_json?: DailyStats;
 }
 
 const AGENT_COLORS: Record<string, string> = {
@@ -193,7 +207,6 @@ function SessionRow({ session }: { session: SessionDetail }) {
 
 // ─── Report Viewer ──────────────────────
 function ReportViewer({ content }: { content: string }) {
-  // Simple markdown-lite rendering
   const lines = content.split('\n');
   const rendered = lines.map((line, i) => {
     if (line.startsWith('### ')) return <h3 key={i} className="text-base font-semibold mt-5 mb-2 text-foreground">{line.slice(4)}</h3>;
@@ -205,11 +218,74 @@ function ReportViewer({ content }: { content: string }) {
     }
     if (line.startsWith('- ')) return <div key={i} className="text-sm text-muted-foreground py-0.5 pl-3 border-l-2 border-border/30">{line.slice(2)}</div>;
     if (line.trim() === '') return <div key={i} className="h-2" />;
-    // Bold inline
     const boldRendered = line.replace(/\*\*(.+?)\*\*/g, '<strong class="text-foreground font-semibold">$1</strong>');
     return <p key={i} className="text-sm text-muted-foreground leading-relaxed" dangerouslySetInnerHTML={{ __html: boldRendered }} />;
   });
   return <div className="space-y-0.5">{rendered}</div>;
+}
+
+// ─── Report History Sidebar Item ──────────────────────
+function ReportHistoryItem({ report, isActive, onLoad, onPin, onDelete }: {
+  report: SavedReport;
+  isActive: boolean;
+  onLoad: () => void;
+  onPin: () => void;
+  onDelete: () => void;
+}) {
+  const Icon = AGENT_ICONS[report.agent] || Zap;
+  const color = AGENT_COLORS[report.agent] || '#6b7280';
+  const timeStr = new Date(report.created_at).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+  const sizeStr = report.content_length >= 1024
+    ? `${(report.content_length / 1024).toFixed(1)}KB`
+    : `${report.content_length}B`;
+
+  return (
+    <div
+      onClick={onLoad}
+      className={`group p-3 rounded-lg cursor-pointer transition-all border ${
+        isActive
+          ? 'bg-indigo-500/10 border-indigo-500/30 shadow-sm'
+          : 'bg-background/40 border-border/20 hover:border-border/50 hover:bg-muted/30'
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <div className="p-1 rounded shrink-0 mt-0.5" style={{ backgroundColor: color + '18' }}>
+          <Icon className="w-3 h-3" style={{ color }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            {report.pinned && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
+            <span className="text-sm font-medium truncate">{report.title}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
+            <span>{timeStr}</span>
+            <span className="text-border">·</span>
+            <span className="capitalize">{report.agent}</span>
+            <span className="text-border">·</span>
+            <span>{sizeStr}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={(e) => { e.stopPropagation(); onPin(); }}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-amber-400 transition-colors"
+            title={report.pinned ? 'Unpin' : 'Pin'}
+          >
+            <Star className={`w-3 h-3 ${report.pinned ? 'fill-amber-400 text-amber-400' : ''}`} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-red-400 transition-colors"
+            title="Delete"
+          >
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── Main Page ──────────────────────
@@ -222,6 +298,12 @@ export function Routines() {
   const [report, setReport] = useState('');
   const [generating, setGenerating] = useState(false);
   const [tab, setTab] = useState<'overview' | 'sessions' | 'errors' | 'report'>('overview');
+
+  // Report History State
+  const [savedReports, setSavedReports] = useState<SavedReport[]>([]);
+  const [activeReportId, setActiveReportId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const fetchStats = useCallback(async () => {
     setLoading(true);
@@ -236,12 +318,37 @@ export function Routines() {
     }
   }, [date, days]);
 
+  const fetchSavedReports = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(`${API}/api/reports?limit=50`);
+      const data = await res.json();
+      setSavedReports(data.reports || []);
+    } catch (e) {
+      console.error('Failed to fetch saved reports:', e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => { fetchStats(); }, [fetchStats]);
+  useEffect(() => { fetchSavedReports(); }, [fetchSavedReports]);
+
+  // Check if a report exists for current date
+  useEffect(() => {
+    const existing = savedReports.find(r => r.date === date);
+    if (existing && !report && !activeReportId) {
+      // Auto-load the existing report for this date
+      loadReport(existing.id);
+    }
+  }, [savedReports, date]);
 
   const shiftDate = (offset: number) => {
     const d = new Date(date);
     d.setDate(d.getDate() + offset);
     setDate(d.toISOString().slice(0, 10));
+    setReport('');
+    setActiveReportId(null);
   };
 
   const generateReport = async () => {
@@ -255,6 +362,11 @@ export function Routines() {
       });
       const data = await res.json();
       setReport(data.report || data.detail || 'No report generated');
+      if (data.report_id) {
+        setActiveReportId(data.report_id);
+      }
+      // Refresh the saved reports list
+      fetchSavedReports();
     } catch (e: any) {
       setReport(`Error: ${e.message}`);
     } finally {
@@ -262,12 +374,53 @@ export function Routines() {
     }
   };
 
+  const loadReport = async (reportId: string) => {
+    try {
+      const res = await fetch(`${API}/api/reports/${reportId}`);
+      const data = await res.json();
+      setReport(data.content || '');
+      setActiveReportId(reportId);
+      setDate(data.date);
+      setTab('report');
+    } catch (e) {
+      console.error('Failed to load report:', e);
+    }
+  };
+
+  const togglePin = async (reportId: string, currentPinned: boolean) => {
+    try {
+      await fetch(`${API}/api/reports/${reportId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: !currentPinned }),
+      });
+      fetchSavedReports();
+    } catch (e) {
+      console.error('Failed to toggle pin:', e);
+    }
+  };
+
+  const deleteReport = async (reportId: string) => {
+    if (!confirm('Delete this report permanently?')) return;
+    try {
+      await fetch(`${API}/api/reports/${reportId}`, { method: 'DELETE' });
+      if (activeReportId === reportId) {
+        setReport('');
+        setActiveReportId(null);
+      }
+      fetchSavedReports();
+    } catch (e) {
+      console.error('Failed to delete report:', e);
+    }
+  };
+
   const isToday = date === new Date().toISOString().slice(0, 10);
   const dateLabel = isToday ? 'Today' : new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const dateReportCount = savedReports.filter(r => r.date === date).length;
 
   return (
     <div className="p-8 h-full overflow-y-auto z-10 relative custom-scrollbar">
-      <div className="max-w-6xl mx-auto space-y-6">
+      <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
@@ -275,6 +428,12 @@ export function Routines() {
             <p className="text-muted-foreground mt-1">Activity analytics, token usage, and AI-generated insights</p>
           </div>
           <div className="flex items-center gap-2">
+            {savedReports.length > 0 && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground bg-card border border-border/50 px-3 py-1.5 rounded-lg">
+                <Archive className="w-3.5 h-3.5" />
+                <span>{savedReports.length} saved</span>
+              </div>
+            )}
             <button onClick={fetchStats} disabled={loading}
               className="p-2 rounded-lg bg-card border border-border/50 text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors">
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -291,9 +450,14 @@ export function Routines() {
             </button>
             <div className="flex items-center gap-2">
               <Calendar className="w-4 h-4 text-indigo-400" />
-              <input type="date" value={date} onChange={e => setDate(e.target.value)}
+              <input type="date" value={date} onChange={e => { setDate(e.target.value); setReport(''); setActiveReportId(null); }}
                 className="bg-transparent text-sm font-medium border-none outline-none text-foreground" />
               <span className="text-xs text-muted-foreground">({dateLabel})</span>
+              {dateReportCount > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 font-medium">
+                  {dateReportCount} report{dateReportCount > 1 ? 's' : ''}
+                </span>
+              )}
             </div>
             <button onClick={() => shiftDate(1)} disabled={isToday}
               className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
@@ -523,33 +687,99 @@ export function Routines() {
             )}
 
             {tab === 'report' && (
-              <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-sm font-semibold flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-indigo-400" />
-                    AI-Generated Report
-                  </h3>
-                  {report && !generating && (
-                    <span className="text-[10px] text-muted-foreground capitalize">Generated by {reportAgent}</span>
-                  )}
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                {/* Report History Sidebar */}
+                <div className="lg:col-span-1">
+                  <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-4 sticky top-8">
+                    <button
+                      onClick={() => setShowHistory(!showHistory)}
+                      className="flex items-center justify-between w-full text-sm font-semibold mb-3"
+                    >
+                      <span className="flex items-center gap-2">
+                        <BookOpen className="w-4 h-4 text-indigo-400" />
+                        Report History
+                        {savedReports.length > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400">
+                            {savedReports.length}
+                          </span>
+                        )}
+                      </span>
+                      <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${
+                        showHistory ? '' : '-rotate-90'
+                      }`} />
+                    </button>
+
+                    {showHistory && (
+                      <div className="space-y-2 max-h-[60vh] overflow-y-auto custom-scrollbar">
+                        {historyLoading ? (
+                          <div className="flex items-center justify-center py-8">
+                            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                          </div>
+                        ) : savedReports.length === 0 ? (
+                          <p className="text-xs text-muted-foreground text-center py-6">
+                            No saved reports yet. Generate one to get started.
+                          </p>
+                        ) : (
+                          savedReports.map(r => (
+                            <ReportHistoryItem
+                              key={r.id}
+                              report={r}
+                              isActive={activeReportId === r.id}
+                              onLoad={() => loadReport(r.id)}
+                              onPin={() => togglePin(r.id, r.pinned)}
+                              onDelete={() => deleteReport(r.id)}
+                            />
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                {generating ? (
-                  <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-                    <Loader2 className="w-8 h-8 animate-spin text-indigo-400 mb-3" />
-                    <p className="text-sm font-medium">Generating report with {reportAgent}...</p>
-                    <p className="text-xs text-muted-foreground/70 mt-1">This may take 15-30 seconds</p>
+
+                {/* Report Content */}
+                <div className="lg:col-span-3">
+                  <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-indigo-400" />
+                        AI-Generated Report
+                      </h3>
+                      {report && !generating && (
+                        <div className="flex items-center gap-3">
+                          {activeReportId && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 font-medium flex items-center gap-1">
+                              <CheckCircle2 className="w-2.5 h-2.5" />
+                              Saved
+                            </span>
+                          )}
+                          <span className="text-[10px] text-muted-foreground capitalize">Generated by {reportAgent}</span>
+                        </div>
+                      )}
+                    </div>
+                    {generating ? (
+                      <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+                        <Loader2 className="w-8 h-8 animate-spin text-indigo-400 mb-3" />
+                        <p className="text-sm font-medium">Generating report with {reportAgent}...</p>
+                        <p className="text-xs text-muted-foreground/70 mt-1">This may take 15-30 seconds • Report will be saved automatically</p>
+                      </div>
+                    ) : report ? (
+                      <div className="prose prose-sm dark:prose-invert max-w-none">
+                        <ReportViewer content={report} />
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+                        <FileText className="w-10 h-10 text-muted-foreground/30 mb-3" />
+                        <p className="text-sm font-medium">No report generated yet</p>
+                        <p className="text-xs text-muted-foreground/70 mt-1">Select a model and click "Generate Report" above</p>
+                        {dateReportCount > 0 && (
+                          <p className="text-xs text-indigo-400 mt-3">
+                            💡 {dateReportCount} saved report{dateReportCount > 1 ? 's' : ''} found for this date — check the history sidebar
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
-                ) : report ? (
-                  <div className="prose prose-sm dark:prose-invert max-w-none">
-                    <ReportViewer content={report} />
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-                    <FileText className="w-10 h-10 text-muted-foreground/30 mb-3" />
-                    <p className="text-sm font-medium">No report generated yet</p>
-                    <p className="text-xs text-muted-foreground/70 mt-1">Select a model and click "Generate Report" above</p>
-                  </div>
-                )}
+                </div>
               </div>
             )}
           </>

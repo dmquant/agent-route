@@ -11,7 +11,84 @@ Inspired by Anthropic's Managed Agents: execute(name, input) → string
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, AsyncGenerator, Callable, Any, List
+import os
+import shutil
 import re
+
+
+# ─── CLI Binary Resolution ──────────────────────────
+# Python subprocesses inherit a minimal PATH that may not include
+# /opt/homebrew/bin, ~/.nvm, etc. This resolver checks common paths.
+
+_COMMON_BIN_DIRS = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    os.path.expanduser("~/.nvm/versions/node"),  # nvm — handled specially
+]
+
+
+def resolve_cli_path(binary: str) -> str:
+    """Resolve the full path to a CLI binary, with macOS-aware fallbacks.
+
+    1. shutil.which (uses current PATH)
+    2. /opt/homebrew/bin (Apple Silicon brew)
+    3. /usr/local/bin (Intel brew / standard)
+    4. nvm node directories (auto-detect latest version)
+    5. Falls back to bare name (let the OS try at spawn time)
+    """
+    # 1. Standard which
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    # 2-3. Check common bin dirs
+    for d in ["/opt/homebrew/bin", "/usr/local/bin"]:
+        candidate = os.path.join(d, binary)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    # 4. nvm — find latest installed node version
+    nvm_base = os.path.expanduser("~/.nvm/versions/node")
+    if os.path.isdir(nvm_base):
+        versions = sorted(os.listdir(nvm_base), reverse=True)
+        for v in versions:
+            candidate = os.path.join(nvm_base, v, "bin", binary)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+    # 5. Fallback — return bare name and let subprocess raise if missing
+    return binary
+
+
+def get_cli_env() -> dict:
+    """Build a subprocess environment with enriched PATH for CLI tools.
+
+    Python venvs and uvicorn often strip PATH to a minimal set.
+    This ensures node, npx, git, and brew-installed tools are findable.
+    """
+    env = os.environ.copy()
+    path_parts = env.get("PATH", "").split(os.pathsep)
+
+    # Directories to inject (prepend, in priority order)
+    extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+    # nvm — add the latest Node version's bin dir
+    nvm_base = os.path.expanduser("~/.nvm/versions/node")
+    if os.path.isdir(nvm_base):
+        versions = sorted(os.listdir(nvm_base), reverse=True)
+        for v in versions:
+            nvm_bin = os.path.join(nvm_base, v, "bin")
+            if os.path.isdir(nvm_bin):
+                extra_dirs.insert(0, nvm_bin)
+                break
+
+    # Prepend missing dirs
+    for d in reversed(extra_dirs):
+        if d not in path_parts and os.path.isdir(d):
+            path_parts.insert(0, d)
+
+    env["PATH"] = os.pathsep.join(path_parts)
+    return env
 
 # ─── Shared Noise Filters ──────────────────────────
 # Known CLI boilerplate lines that pollute user-facing output

@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import asyncio
+import time as _time
+from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -9,8 +11,9 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), '.env')
 load_dotenv(dotenv_path=env_path)
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import websockets
 import httpx
@@ -19,6 +22,10 @@ import httpx
 # and SessionEventManager now. Historical logs migrated to session events.
 from app.agent_registry import get_all_agents, discover_skills
 from app.report_engine import get_daily_stats, build_report_prompt
+from app.report_store import (
+    init_report_tables, save_report, list_reports, get_report,
+    get_report_by_date, update_report, delete_report,
+)
 from app.hands.registry import hand_registry, auto_register_all
 from app.session.manager import session_events, init_event_tables
 from app.session.events import EventType
@@ -26,12 +33,24 @@ from app.brain.orchestrator import orchestrator
 from app.brain.harness import harness_manager
 from app.sandbox.pool import sandbox_pool, init_sandbox_tables
 from app.tasks import task_manager, TaskPhase, init_task_tables, get_task_history
+from app.task_analytics import get_task_analytics, get_benchmark_comparison
+from app.workflow_store import (
+    init_workflow_tables, create_workflow, list_workflows, get_workflow,
+    update_workflow, delete_workflow, create_run, update_run, get_run, list_runs,
+)
+from app.workflow_executor import workflow_executor
 from app.session_store import (
     init_session_db,
     create_project, list_projects, update_project, delete_project,
     create_session, list_sessions, get_session, update_session, delete_session,
     add_message, get_messages, get_messages_with_images, auto_title_session,
     get_session_workspace,
+    create_context_link, get_context_links, delete_context_link,
+    get_linked_messages, fork_session,
+)
+from app.api_logger import (
+    init_api_log_tables, record_api_call, get_api_calls,
+    get_api_stats, get_api_timeline, _extract_agent,
 )
 
 app = FastAPI(title="AI Execution Bridge API", description="Pydantic structured REST & WS gateway for Agent CLIs.")
@@ -43,6 +62,71 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── API Call Logging Middleware ──────────────────────────────
+# Records every HTTP request for the unified activity feed.
+# WebSocket upgrades are excluded (they log at connection time).
+
+_SKIP_LOG_PREFIXES = ("/docs", "/openapi.json", "/favicon")
+
+class APICallLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Skip internal/docs paths
+        if any(path.startswith(p) for p in _SKIP_LOG_PREFIXES):
+            return await call_next(request)
+
+        request_id = uuid.uuid4().hex[:16]
+        method = request.method
+        query = str(request.url.query) if request.url.query else ""
+        client_ip = request.client.host if request.client else ""
+        user_agent = request.headers.get("user-agent", "")[:200]
+
+        # Try to read body preview for POST/PUT (non-blocking)
+        body_preview = ""
+        agent = ""
+        if method in ("POST", "PUT"):
+            try:
+                body_bytes = await request.body()
+                body_preview = body_bytes.decode("utf-8", errors="replace")[:500]
+                try:
+                    body_json = json.loads(body_bytes)
+                    agent = _extract_agent(path, body_json)
+                except (json.JSONDecodeError, Exception):
+                    pass
+            except Exception:
+                pass
+
+        # Detect source: UI frontend vs external API client
+        source = "ui" if ("localhost:5173" in request.headers.get("origin", "")
+                          or "localhost:5173" in request.headers.get("referer", "")
+                          ) else "api"
+
+        start = _time.monotonic()
+        response = await call_next(request)
+        duration_ms = (_time.monotonic() - start) * 1000
+
+        # Record asynchronously to avoid blocking the response
+        try:
+            record_api_call(
+                request_id=request_id,
+                method=method,
+                path=path,
+                query_params=query,
+                status_code=response.status_code,
+                duration_ms=round(duration_ms, 2),
+                client_ip=client_ip,
+                user_agent=user_agent,
+                request_body_preview=body_preview,
+                agent=agent,
+                source=source,
+            )
+        except Exception:
+            pass  # Never let logging break the request
+
+        return response
+
+app.add_middleware(APICallLogMiddleware)
 
 class ExecutionRequest(BaseModel):
     client: str
@@ -87,6 +171,9 @@ async def startup_event():
     init_event_tables()
     init_sandbox_tables()
     init_task_tables()
+    init_report_tables()
+    init_workflow_tables()
+    init_api_log_tables()
     # Register all execution hands (Managed Agents Phase 1)
     auto_register_all()
     print(f"[Startup] Hand Registry: {hand_registry.list_names()}")
@@ -399,6 +486,18 @@ def api_brain_context_stats(session_id: str, agent: str = "gemini"):
     harness = harness_manager.select(agent)
     return orchestrator.context.get_context_stats(session_id, harness)
 
+@app.get("/api/brain/{session_id}/context/shared")
+def api_brain_shared_context(session_id: str, agent: str = "gemini"):
+    """Build context window enriched with linked session context.
+
+    Merges the current session's events with messages from linked sessions,
+    respecting token budgets. Used by Brain Inspector to visualize
+    cross-session context lineage.
+    """
+    harness = harness_manager.select(agent)
+    result = orchestrator.context.build_shared_context(session_id, harness)
+    return result
+
 @app.get("/api/brain/{session_id}/context/rewind")
 def api_brain_rewind(session_id: str, before_event_id: int, count: int = 10):
     """Rewind: get events leading up to a specific event."""
@@ -471,7 +570,7 @@ class ReportGenerateRequest(BaseModel):
 
 @app.post("/api/reports/generate")
 async def api_generate_report(req: ReportGenerateRequest):
-    """Generate an AI narrative report using a selected agent."""
+    """Generate an AI narrative report using a selected agent, then persist it."""
     stats = get_daily_stats(req.date, req.days)
     prompt = build_report_prompt(stats)
     
@@ -482,19 +581,378 @@ async def api_generate_report(req: ReportGenerateRequest):
             raise HTTPException(status_code=404, detail=f"No hand registered for '{req.agent}'")
 
         result = await hand.execute(prompt, workspace_dir="/tmp/reports")
+        report_content = result.output or ""
+
+        # Auto-persist the generated report
+        saved = save_report(
+            date=req.date or datetime.now().strftime('%Y-%m-%d'),
+            days=req.days,
+            agent=req.agent,
+            content=report_content,
+            stats=stats,
+            prompt=prompt,
+        )
+
         return {
-            "report": result.output,
+            "report": report_content,
+            "report_id": saved["id"],
             "stats": stats,
             "agent_used": req.agent,
             "prompt_length": len(prompt),
+            "saved": True,
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
 
+
+# ─── Report CRUD Endpoints ──────────────────────
+
+@app.get("/api/reports")
+def api_list_reports(limit: int = 50, date: Optional[str] = None, agent: Optional[str] = None):
+    """List saved reports with metadata (no full content)."""
+    return {"reports": list_reports(limit=limit, date=date, agent=agent)}
+
+
+@app.get("/api/reports/{report_id}")
+def api_get_report(report_id: str):
+    """Get a single report by ID including full content."""
+    report = get_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@app.get("/api/reports/date/{date}")
+def api_get_report_by_date(date: str):
+    """Get the most recent report generated for a specific date."""
+    report = get_report_by_date(date)
+    if not report:
+        return {"found": False, "date": date}
+    return {"found": True, **report}
+
+
+class ReportUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    content: Optional[str] = None
+
+
+@app.patch("/api/reports/{report_id}")
+def api_update_report(report_id: str, req: ReportUpdateRequest):
+    """Update report metadata (title, pinned status, or content)."""
+    updates = {}
+    if req.title is not None:
+        updates["title"] = req.title
+    if req.pinned is not None:
+        updates["pinned"] = 1 if req.pinned else 0
+    if req.content is not None:
+        updates["content"] = req.content
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    success = update_report(report_id, **updates)
+    if not success:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {"updated": True}
+
+
+@app.delete("/api/reports/{report_id}")
+def api_delete_report(report_id: str):
+    """Delete a saved report."""
+    success = delete_report(report_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {"deleted": True}
+
 # ---------------------------------------------
-# 3c. Structured REST Endpoint (For External Desktop/Apps)
+# 3d. Workflow CRUD + Execution Endpoints
+# ---------------------------------------------
+
+class WorkflowCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    steps: list = []
+    config: dict = {}
+
+
+class WorkflowUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    steps: Optional[list] = None
+    config: Optional[dict] = None
+
+
+class WorkflowRunRequest(BaseModel):
+    session_id: Optional[str] = None
+    session_title: Optional[str] = None
+
+
+@app.get("/api/workflows")
+def api_list_workflows():
+    return {"workflows": list_workflows()}
+
+
+@app.post("/api/workflows")
+def api_create_workflow(req: WorkflowCreateRequest):
+    wf = create_workflow(
+        name=req.name,
+        description=req.description,
+        steps=req.steps,
+        config=req.config,
+    )
+    return wf
+
+
+@app.get("/api/workflows/{workflow_id}")
+def api_get_workflow(workflow_id: str):
+    wf = get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return wf
+
+
+@app.put("/api/workflows/{workflow_id}")
+def api_update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
+    wf = update_workflow(
+        workflow_id,
+        name=req.name,
+        description=req.description,
+        steps=req.steps,
+        config=req.config,
+    )
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return wf
+
+
+@app.delete("/api/workflows/{workflow_id}")
+def api_delete_workflow(workflow_id: str):
+    success = delete_workflow(workflow_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return {"deleted": True}
+
+
+@app.post("/api/workflows/{workflow_id}/run")
+async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
+    """Start a workflow execution. Creates or reuses a session."""
+    wf = get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if req.session_id:
+        session = get_session(req.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_id = req.session_id
+    else:
+        title = req.session_title or f"Workflow: {wf['name']}"
+        session = create_session(title=title, agent_type="workflow")
+        session_id = session["id"]
+
+    run = create_run(workflow_id=workflow_id, session_id=session_id)
+
+    await workflow_executor.start_workflow(
+        run_id=run["id"],
+        workflow=wf,
+        session_id=session_id,
+    )
+
+    return {
+        "run_id": run["id"],
+        "session_id": session_id,
+        "status": "running",
+        "workflow": wf["name"],
+    }
+
+
+@app.get("/api/workflows/{workflow_id}/runs")
+def api_list_workflow_runs(workflow_id: str, limit: int = 50):
+    return {"runs": list_runs(workflow_id=workflow_id, limit=limit)}
+
+
+@app.get("/api/workflow-runs/{run_id}")
+def api_get_run(run_id: str):
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.post("/api/workflow-runs/{run_id}/cancel")
+def api_cancel_run(run_id: str):
+    success = workflow_executor.cancel_run(run_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Run not running or not found")
+    return {"cancelled": True}
+
+
+class SessionWorkflowRunRequest(BaseModel):
+    workflow_id: str
+
+
+@app.post("/api/sessions/{session_id}/run-workflow")
+async def api_run_workflow_in_session(session_id: str, req: SessionWorkflowRunRequest):
+    """Run a saved workflow within an existing session.
+    
+    This allows the Chat/Workspace interface to trigger workflow execution
+    using the same session context, workspace, and message history.
+    """
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    wf = get_workflow(req.workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    run = create_run(workflow_id=req.workflow_id, session_id=session_id)
+
+    await workflow_executor.start_workflow(
+        run_id=run["id"],
+        workflow=wf,
+        session_id=session_id,
+    )
+
+    return {
+        "run_id": run["id"],
+        "session_id": session_id,
+        "status": "running",
+        "workflow": wf["name"],
+        "steps": len(wf.get("steps", [])),
+    }
+
+
+# ─── Session Context Sharing Endpoints ────────────────────────────
+
+class ContextLinkRequest(BaseModel):
+    target_session_id: str
+    link_type: str = 'reference'  # reference | fork | shared_workspace
+    label: str = ''
+    include_messages: bool = True
+    include_files: bool = True
+    max_messages: int = 50
+
+
+@app.post("/api/sessions/{session_id}/context-links")
+def api_create_context_link(session_id: str, req: ContextLinkRequest):
+    """Link a session to another session for context sharing.
+
+    Link types:
+    - reference: Read messages/events from the target session as context
+    - fork: This session was forked from the target
+    - shared_workspace: Share the workspace directory with the target
+    """
+    link = create_context_link(
+        source_session_id=session_id,
+        target_session_id=req.target_session_id,
+        link_type=req.link_type,
+        label=req.label,
+        include_messages=req.include_messages,
+        include_files=req.include_files,
+        max_messages=req.max_messages,
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Session(s) not found")
+    return link
+
+
+@app.get("/api/sessions/{session_id}/context-links")
+def api_get_context_links(session_id: str):
+    """Get all context links for a session (both incoming and outgoing)."""
+    return get_context_links(session_id)
+
+
+@app.delete("/api/context-links/{link_id}")
+def api_delete_context_link(link_id: str):
+    """Remove a context link."""
+    delete_context_link(link_id)
+    return {"deleted": True}
+
+
+@app.get("/api/sessions/{session_id}/linked-messages")
+def api_get_linked_messages(session_id: str, limit: int = 50):
+    """Get messages from all linked sessions.
+
+    Returns messages from sessions linked to this one,
+    tagged with their source session info.
+    """
+    return get_linked_messages(session_id, limit_per_link=limit)
+
+
+class ForkSessionRequest(BaseModel):
+    title: str = ''
+    agent_type: str = ''
+    copy_messages: int = 0  # 0 = reference only, >0 = copy last N messages
+
+
+@app.post("/api/sessions/{session_id}/fork")
+def api_fork_session(session_id: str, req: ForkSessionRequest):
+    """Fork a new session from an existing one.
+
+    Creates a new session linked to the source via 'fork' link.
+    Optionally copies the last N messages for immediate context.
+    """
+    result = fork_session(
+        source_session_id=session_id,
+        title=req.title,
+        agent_type=req.agent_type,
+        copy_messages=req.copy_messages,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Source session not found")
+    return result
+
+from fastapi import UploadFile, File as FastAPIFile
+
+
+@app.post("/api/upload/{session_id}")
+async def api_upload_to_session(session_id: str, file: UploadFile = FastAPIFile(...)):
+    """Upload file to session workspace."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workspace = get_session_workspace(session_id)
+    filepath = os.path.join(workspace, file.filename)
+    os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else workspace, exist_ok=True)
+
+    content = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    return {
+        "filename": file.filename,
+        "path": filepath,
+        "size": len(content),
+        "session_id": session_id,
+    }
+
+
+@app.get("/api/sessions/{session_id}/files")
+def api_list_session_files(session_id: str):
+    """List files in a session's workspace."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workspace = get_session_workspace(session_id)
+    files = []
+    if os.path.isdir(workspace):
+        for entry in os.listdir(workspace):
+            full = os.path.join(workspace, entry)
+            if os.path.isfile(full):
+                files.append({
+                    "name": entry,
+                    "size": os.path.getsize(full),
+                    "path": full,
+                })
+    return {"files": files, "workspace": workspace}
+
+
 # ---------------------------------------------
 # ─── Environment gate check (shared by REST + WebSocket) ─────
 _ENV_GATES = {
@@ -512,9 +970,10 @@ def _check_env_gate(client: str):
         raise HTTPException(status_code=403, detail=f"{client} route disabled inside global .env")
 
 @app.post("/execute", response_model=ExecutionResponse)
-async def execute_task(req: ExecutionRequest):
+async def execute_task(req: ExecutionRequest, request: Request):
     """
     Execute via Hand Registry: execute(name, input) → string.
+    Direct API calls are auto-recorded into sessions for unified tracking.
     """
     _check_env_gate(req.client)
 
@@ -525,11 +984,32 @@ async def execute_task(req: ExecutionRequest):
     workspace_str = req.workspace_id or "default_sync"
     workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
 
+    # ─── Session-aware: record into a session for tracking ─────
+    is_ui = "localhost:5173" in request.headers.get("origin", "")
+    session_id = None
+    if not is_ui:
+        # Direct API call — auto-create or reuse an API session
+        session = create_session(title=f"API: {req.prompt[:50]}", agent_type=req.client)
+        session_id = session["id"]
+        add_message(session_id, source="user", content=req.prompt, agent_type=req.client)
+        auto_title_session(session_id)
+        session_events.emit_event(session_id, EventType.USER_MESSAGE, content=req.prompt, agent="user")
+        session_events.emit_event(session_id, EventType.AGENT_SELECTED, agent=req.client, metadata={"source": "direct_api"})
+
     target_opt_kwargs = {}
     if req.client == "ollama":
         target_opt_kwargs["model"] = req.model or "llama3"
 
     result = await hand.execute(req.prompt, workspace_dir=workspace_dir, **target_opt_kwargs)
+
+    # ─── Record result into session ─────
+    if session_id:
+        add_message(session_id, source="agent", content=result.output, agent_type=req.client)
+        evt_type = EventType.TOOL_RESULT if result.success else EventType.TOOL_ERROR
+        session_events.emit_event(session_id, evt_type, content=result.output[:2000], agent=req.client,
+                                  metadata={"exit_code": result.exit_code, "source": "direct_api"})
+        session_events.emit_event(session_id, EventType.AGENT_RESPONSE, content=result.output[:2000], agent=req.client)
+
     return ExecutionResponse(exitCode=result.exit_code, output=result.output)
 
 from fastapi.responses import StreamingResponse
@@ -537,9 +1017,10 @@ import asyncio
 import json
 
 @app.post("/execute/stream")
-async def execute_task_stream(req: ExecutionRequest):
+async def execute_task_stream(req: ExecutionRequest, request: Request):
     """
     Execute streaming LLM task via Hand Registry using ndjson.
+    Direct API calls are auto-recorded into sessions for unified tracking.
     """
     _check_env_gate(req.client)
 
@@ -550,9 +1031,22 @@ async def execute_task_stream(req: ExecutionRequest):
     workspace_str = req.workspace_id or "default_sync"
     workspace_dir = os.path.join(os.getcwd(), '..', 'workspaces', workspace_str)
 
+    # ─── Session-aware: record into a session for tracking ─────
+    is_ui = "localhost:5173" in request.headers.get("origin", "")
+    session_id = None
+    if not is_ui:
+        session = create_session(title=f"API: {req.prompt[:50]}", agent_type=req.client)
+        session_id = session["id"]
+        add_message(session_id, source="user", content=req.prompt, agent_type=req.client)
+        auto_title_session(session_id)
+        session_events.emit_event(session_id, EventType.USER_MESSAGE, content=req.prompt, agent="user")
+        session_events.emit_event(session_id, EventType.AGENT_SELECTED, agent=req.client, metadata={"source": "direct_api"})
+
     q = asyncio.Queue()
+    full_output: list = []
 
     async def stream_log(chunk: str):
+        full_output.append(chunk)
         await q.put({"type": "node_execution_log", "log": chunk})
 
     target_opt_kwargs = {}
@@ -565,7 +1059,15 @@ async def execute_task_stream(req: ExecutionRequest):
             result = await hand.execute(req.prompt, workspace_dir=workspace_dir, on_log=stream_log, **target_opt_kwargs)
             if result.image_b64:
                 await q.put({"type": "node_execution_image", "b64": result.image_b64})
-            await q.put({"type": "node_execution_completed", "exitCode": result.exit_code})
+            # Record result into session
+            if session_id:
+                output_text = "".join(full_output)
+                add_message(session_id, source="agent", content=output_text, agent_type=req.client, image_b64=result.image_b64)
+                evt_type = EventType.TOOL_RESULT if result.success else EventType.TOOL_ERROR
+                session_events.emit_event(session_id, evt_type, content=output_text[:2000], agent=req.client,
+                                          metadata={"exit_code": result.exit_code, "source": "direct_api"})
+                session_events.emit_event(session_id, EventType.AGENT_RESPONSE, content=output_text[:2000], agent=req.client)
+            await q.put({"type": "node_execution_completed", "exitCode": result.exit_code, "sessionId": session_id})
         except Exception as e:
             await q.put({"type": "node_execution_log", "log": f"\n[Fatal Router Error] {e}\n"})
             await q.put({"type": "node_execution_completed", "exitCode": 1})
@@ -647,8 +1149,131 @@ def api_task_history(session_id: Optional[str] = None, limit: int = 50):
     """Query persistent task history from SQLite."""
     return {"tasks": get_task_history(session_id=session_id, limit=limit)}
 
+@app.get("/api/analytics")
+def api_task_analytics(date: Optional[str] = None, days: int = 7, session_id: Optional[str] = None):
+    """Get aggregate task performance analytics."""
+    return get_task_analytics(date_str=date, days=days, session_id=session_id)
+
+@app.get("/api/analytics/benchmark")
+def api_benchmark(agents: Optional[str] = None, days: int = 30):
+    """Compare agent performance head-to-head."""
+    agent_list = agents.split(',') if agents else None
+    return get_benchmark_comparison(agents=agent_list, days=days)
+
 # ---------------------------------------------
-# 4b. Session-Aware Native WebSocket Streaming
+# 4b. Unified API Activity Feed (Middle Desk)
+# ---------------------------------------------
+
+@app.get("/api/activity/calls")
+def api_activity_calls(
+    limit: int = 100,
+    category: Optional[str] = None,
+    session_id: Optional[str] = None,
+    source: Optional[str] = None,
+    since_ms: Optional[float] = None,
+):
+    """Query the API call log with optional filters.
+    
+    Categories: execution, brain, workflow, session_mutation, session_read,
+    context, report, agent, analytics, sandbox, file, websocket, other
+    
+    Sources: 'api' (external/direct), 'ui' (frontend)
+    """
+    calls = get_api_calls(
+        limit=limit, category=category, session_id=session_id,
+        source=source, since_ms=since_ms,
+    )
+    return {"calls": calls, "total": len(calls)}
+
+
+@app.get("/api/activity/stats")
+def api_activity_stats(hours: int = 24):
+    """Aggregate API call statistics over the given time window."""
+    return get_api_stats(hours=hours)
+
+
+@app.get("/api/activity/timeline")
+def api_activity_timeline(hours: int = 1, bucket_minutes: int = 5):
+    """Time-series API call frequency for live monitoring charts."""
+    return {"timeline": get_api_timeline(hours=hours, bucket_minutes=bucket_minutes)}
+
+
+@app.get("/api/activity/feed")
+def api_unified_feed(limit: int = 50, source: Optional[str] = None):
+    """Unified activity feed combining API calls, running tasks, and recent sessions.
+    
+    This is the primary endpoint for the Brain Inspector 'Middle Desk' view,
+    merging all activity into a single chronological feed.
+    """
+    # 1. Recent API execution calls
+    execution_calls = get_api_calls(limit=limit, category="execution", source=source)
+
+    # 2. Currently running tasks
+    running_tasks = task_manager.get_all_status()
+
+    # 3. Recent sessions (sorted by updated_at desc)
+    recent_sessions = list_sessions()[:limit]
+
+    # 4. Recent workflow runs
+    from app.workflow_store import list_runs as list_all_runs
+    recent_runs = list_all_runs(limit=limit)
+
+    # Build unified feed
+    feed = []
+
+    for call in execution_calls:
+        feed.append({
+            "type": "api_call",
+            "timestamp": call.get("created_at", 0),
+            "method": call.get("method"),
+            "path": call.get("path"),
+            "status_code": call.get("status_code"),
+            "duration_ms": call.get("duration_ms"),
+            "agent": call.get("agent"),
+            "session_id": call.get("session_id"),
+            "source": call.get("source"),
+            "category": call.get("category"),
+            "request_id": call.get("request_id"),
+        })
+
+    for task in running_tasks:
+        feed.append({
+            "type": "running_task",
+            "timestamp": task.get("started_at", 0),
+            "task_id": task.get("task_id"),
+            "session_id": task.get("session_id"),
+            "agent": task.get("agent"),
+            "phase": task.get("phase"),
+            "elapsed_ms": task.get("elapsed_ms"),
+            "prompt": task.get("prompt", "")[:80],
+        })
+
+    for run in recent_runs[:20]:
+        feed.append({
+            "type": "workflow_run",
+            "timestamp": run.get("started_at", 0),
+            "run_id": run.get("id"),
+            "workflow_id": run.get("workflow_id"),
+            "session_id": run.get("session_id"),
+            "status": run.get("status"),
+        })
+
+    # Sort by timestamp descending
+    feed.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+
+    return {
+        "feed": feed[:limit],
+        "summary": {
+            "total_api_calls": len(execution_calls),
+            "running_tasks": len(running_tasks),
+            "recent_sessions": len(recent_sessions),
+            "recent_workflow_runs": len(recent_runs),
+        },
+    }
+
+
+# ---------------------------------------------
+# 4c. Session-Aware Native WebSocket Streaming
 #     with Background Task Support
 # ---------------------------------------------
 @app.websocket("/ws/agent")

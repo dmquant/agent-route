@@ -5,6 +5,10 @@ or discard context can lead to failures." The session event log stores
 ALL context durably. The ContextEngine decides what to pass to the
 brain's context window for each turn — full replay, sliding window,
 or compaction.
+
+Enhanced with cross-session context sharing: sessions can inherit
+context from linked sessions, enabling knowledge transfer across
+different agent invocations and workflow steps.
 """
 
 from typing import List, Optional
@@ -236,3 +240,85 @@ class ContextEngine:
                 else "sliding_window"
             ),
         }
+
+    def build_shared_context(
+        self,
+        session_id: str,
+        harness: HarnessConfig,
+        event_types: Optional[List[EventType]] = None,
+    ) -> dict:
+        """Build context window enriched with linked session context.
+
+        This is the key method for cross-session context sharing.
+        It merges the current session's events with messages from
+        linked sessions, respecting token budgets.
+
+        Returns the same format as build_context, with an additional
+        'linked_context' field containing the injected messages.
+        """
+        # First, build the primary session context
+        primary = self.build_context(session_id, harness, event_types)
+
+        # Then, fetch linked messages
+        try:
+            from app.session_store import get_linked_messages
+            linked_msgs = get_linked_messages(session_id, limit_per_link=30)
+        except Exception:
+            linked_msgs = []
+
+        if not linked_msgs:
+            primary["linked_context"] = []
+            primary["linked_sessions"] = 0
+            return primary
+
+        # Build synthetic context events from linked messages
+        linked_events = []
+        linked_session_ids = set()
+        for msg in linked_msgs:
+            linked_session_ids.add(msg.get("_linked_from", ""))
+            prefix = f"[Context from '{msg.get('_linked_title', 'linked')}']"
+            content = msg.get("content", "")
+            source = msg.get("source", "user")
+            linked_events.append({
+                "id": 0,
+                "session_id": msg.get("_linked_from", ""),
+                "event_type": "context.linked",
+                "agent": msg.get("agent_type"),
+                "content": f"{prefix} ({source}): {content[:500]}",
+                "metadata": {
+                    "linked_from": msg.get("_linked_from"),
+                    "linked_title": msg.get("_linked_title"),
+                    "link_type": msg.get("_link_type"),
+                    "original_source": source,
+                },
+                "timestamp": msg.get("created_at", 0),
+            })
+
+        # Calculate token budget for linked context (reserve 20% of budget)
+        linked_budget = int(harness.max_context_tokens * 0.2)
+        linked_tokens = sum(
+            len(e["content"]) // _CHARS_PER_TOKEN for e in linked_events
+        )
+
+        # Trim if exceeds budget
+        if linked_tokens > linked_budget:
+            trimmed = []
+            used = 0
+            for e in reversed(linked_events):  # Keep most recent
+                t = len(e["content"]) // _CHARS_PER_TOKEN
+                if used + t > linked_budget:
+                    break
+                trimmed.insert(0, e)
+                used += t
+            linked_events = trimmed
+
+        # Inject linked context before primary events
+        primary["events"] = linked_events + primary.get("events", [])
+        primary["linked_context"] = linked_events
+        primary["linked_sessions"] = len(linked_session_ids)
+        primary["estimated_tokens"] += sum(
+            len(e["content"]) // _CHARS_PER_TOKEN for e in linked_events
+        )
+        primary["strategy"] = f"shared_{primary['strategy']}"
+
+        return primary

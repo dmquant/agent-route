@@ -58,9 +58,25 @@ def init_session_db():
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS session_context_links (
+            id TEXT PRIMARY KEY,
+            source_session_id TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            link_type TEXT NOT NULL DEFAULT 'reference',
+            label TEXT DEFAULT '',
+            include_messages INTEGER DEFAULT 1,
+            include_files INTEGER DEFAULT 1,
+            max_messages INTEGER DEFAULT 50,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (source_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_context_links_source ON session_context_links(source_session_id);
+        CREATE INDEX IF NOT EXISTS idx_context_links_target ON session_context_links(target_session_id);
     ''')
     conn.commit()
 
@@ -315,3 +331,204 @@ def auto_title_session(session_id: str):
             conn.execute('UPDATE sessions SET title=?, updated_at=? WHERE id=?', (title, now, session_id))
             conn.commit()
     conn.close()
+
+
+# ─── Context Links ──────────────────────────────────────────
+
+def create_context_link(
+    source_session_id: str,
+    target_session_id: str,
+    link_type: str = 'reference',
+    label: str = '',
+    include_messages: bool = True,
+    include_files: bool = True,
+    max_messages: int = 50,
+) -> Dict:
+    """Create a context link between two sessions.
+
+    Link types:
+        'reference'        — Source can read target's messages/events as context
+        'fork'             — Source was forked from target (inherits full history)
+        'shared_workspace' — Both sessions share the same workspace directory
+    """
+    conn = _get_conn()
+    link_id = uuid4().hex[:16]
+    now = int(time.time() * 1000)
+
+    # Validate both sessions exist
+    src = conn.execute('SELECT id FROM sessions WHERE id=?', (source_session_id,)).fetchone()
+    tgt = conn.execute('SELECT id FROM sessions WHERE id=?', (target_session_id,)).fetchone()
+    if not src or not tgt:
+        conn.close()
+        return None
+
+    # Prevent duplicate links
+    existing = conn.execute(
+        'SELECT id FROM session_context_links WHERE source_session_id=? AND target_session_id=?',
+        (source_session_id, target_session_id),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return {'id': existing['id'], 'already_exists': True}
+
+    conn.execute(
+        '''INSERT INTO session_context_links
+           (id, source_session_id, target_session_id, link_type, label,
+            include_messages, include_files, max_messages, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)''',
+        (link_id, source_session_id, target_session_id, link_type, label,
+         1 if include_messages else 0, 1 if include_files else 0, max_messages, now),
+    )
+
+    # If shared_workspace, update source to use target's workspace
+    if link_type == 'shared_workspace':
+        tgt_row = conn.execute('SELECT workspace_dir FROM sessions WHERE id=?', (target_session_id,)).fetchone()
+        if tgt_row and tgt_row['workspace_dir']:
+            conn.execute(
+                'UPDATE sessions SET workspace_dir=?, updated_at=? WHERE id=?',
+                (tgt_row['workspace_dir'], now, source_session_id),
+            )
+
+    conn.commit()
+    row = conn.execute('SELECT * FROM session_context_links WHERE id=?', (link_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_context_links(session_id: str) -> List[Dict]:
+    """Get all context links for a session (both incoming and outgoing)."""
+    conn = _get_conn()
+    # Outgoing links: sessions this session reads from
+    outgoing = conn.execute(
+        '''SELECT cl.*, s.title as target_title, s.agent_type as target_agent
+           FROM session_context_links cl
+           JOIN sessions s ON cl.target_session_id = s.id
+           WHERE cl.source_session_id = ?
+           ORDER BY cl.created_at DESC''',
+        (session_id,),
+    ).fetchall()
+    # Incoming links: sessions that read from this session
+    incoming = conn.execute(
+        '''SELECT cl.*, s.title as source_title, s.agent_type as source_agent
+           FROM session_context_links cl
+           JOIN sessions s ON cl.source_session_id = s.id
+           WHERE cl.target_session_id = ?
+           ORDER BY cl.created_at DESC''',
+        (session_id,),
+    ).fetchall()
+    conn.close()
+    return {
+        'outgoing': [dict(r) for r in outgoing],
+        'incoming': [dict(r) for r in incoming],
+    }
+
+
+def delete_context_link(link_id: str) -> bool:
+    """Remove a context link."""
+    conn = _get_conn()
+    conn.execute('DELETE FROM session_context_links WHERE id=?', (link_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_linked_messages(
+    session_id: str,
+    limit_per_link: int = 50,
+) -> List[Dict]:
+    """Get messages from all linked (reference) sessions.
+
+    Returns messages from linked sessions, tagged with their source session.
+    Used by the context engine to inject cross-session context.
+    """
+    conn = _get_conn()
+    links = conn.execute(
+        '''SELECT * FROM session_context_links
+           WHERE source_session_id = ? AND include_messages = 1
+           ORDER BY created_at ASC''',
+        (session_id,),
+    ).fetchall()
+
+    all_messages = []
+    for link in links:
+        lim = min(link['max_messages'], limit_per_link)
+        target_id = link['target_session_id']
+        # Get the most recent N messages from the linked session
+        msgs = conn.execute(
+            '''SELECT id, session_id, source, content, agent_type, created_at
+               FROM messages WHERE session_id = ?
+               ORDER BY created_at DESC LIMIT ?''',
+            (target_id, lim),
+        ).fetchall()
+        # Get session title for context
+        target_session = conn.execute(
+            'SELECT title FROM sessions WHERE id=?', (target_id,),
+        ).fetchone()
+        target_title = target_session['title'] if target_session else target_id[:8]
+        for m in reversed(msgs):  # re-order chronologically
+            d = dict(m)
+            d['_linked_from'] = target_id
+            d['_linked_title'] = target_title
+            d['_link_type'] = link['link_type']
+            all_messages.append(d)
+
+    conn.close()
+    return all_messages
+
+
+def fork_session(
+    source_session_id: str,
+    title: str = '',
+    agent_type: str = '',
+    copy_messages: int = 0,
+) -> Dict:
+    """Fork a new session from an existing one.
+
+    Creates a new session linked to the source via 'fork' link.
+    Optionally copies the last N messages for immediate context.
+    """
+    conn = _get_conn()
+    source = conn.execute('SELECT * FROM sessions WHERE id=?', (source_session_id,)).fetchone()
+    if not source:
+        conn.close()
+        return None
+
+    conn.close()
+
+    new_title = title or f"Fork of {source['title']}"
+    new_agent = agent_type or source['agent_type']
+    new_session = create_session(
+        project_id=source['project_id'],
+        title=new_title,
+        agent_type=new_agent,
+    )
+
+    # Create fork link
+    create_context_link(
+        source_session_id=new_session['id'],
+        target_session_id=source_session_id,
+        link_type='fork',
+        label=f"Forked from {source['title']}",
+    )
+
+    # Optionally copy messages
+    if copy_messages > 0:
+        conn = _get_conn()
+        msgs = conn.execute(
+            '''SELECT source, content, agent_type, image_b64
+               FROM messages WHERE session_id = ?
+               ORDER BY created_at DESC LIMIT ?''',
+            (source_session_id, copy_messages),
+        ).fetchall()
+        now = int(time.time() * 1000)
+        for m in reversed(msgs):
+            conn.execute(
+                '''INSERT INTO messages (session_id, source, content, agent_type, image_b64, created_at)
+                   VALUES (?,?,?,?,?,?)''',
+                (new_session['id'], m['source'], m['content'], m['agent_type'], m['image_b64'], now),
+            )
+            now += 1  # ensure ordering
+        conn.commit()
+        conn.close()
+
+    return new_session
