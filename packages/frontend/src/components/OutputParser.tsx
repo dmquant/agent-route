@@ -3,7 +3,7 @@ import {
   Folder, ChevronRight, ChevronDown, FileCode, CheckCircle2,
   Zap, XCircle, Brain, Wrench, PenTool,
   Terminal, Search, Copy, Check, Globe, Sparkles, FileText,
-  FolderOpen, GitMerge, Plug, Eye, ChevronUp,
+  Eye, ChevronUp,
 } from 'lucide-react';
 
 // ─── Stream Chunk Types ──────────────────────

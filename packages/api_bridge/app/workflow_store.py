@@ -3,14 +3,26 @@ Workflow Store — SQLite persistence for workflow definitions.
 
 Schema:
     workflows(
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        steps_json  TEXT NOT NULL,      -- JSON array of WorkflowStep dicts
-        config_json TEXT DEFAULT '{}',  -- Global workflow config
-        created_at  INTEGER NOT NULL,
-        updated_at  INTEGER NOT NULL
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        description     TEXT DEFAULT '',
+        steps_json      TEXT NOT NULL,      -- JSON array of WorkflowStep dicts
+        config_json     TEXT DEFAULT '{}',  -- Global workflow config
+        variables_json  TEXT DEFAULT '[]',  -- JSON array of variable definitions
+        edges_json      TEXT DEFAULT '[]',  -- JSON array of DAG edge dicts
+        positions_json  TEXT DEFAULT '{}',  -- JSON dict of node positions {id: {x, y}}
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL
     )
+
+    Variable definition format:
+        {
+            "name": "TICKER",       -- Used as ${TICKER} in prompts
+            "label": "Stock Ticker", -- Human-readable label for UI
+            "type": "string",       -- string | number | text (multiline)
+            "default": "NVDA",     -- Default value (used if not overridden)
+            "required": true        -- Whether the variable must be set at run time
+        }
 
     workflow_runs(
         id            TEXT PRIMARY KEY,
@@ -47,25 +59,29 @@ def init_workflow_tables():
     conn = _get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS workflows (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            steps_json  TEXT NOT NULL DEFAULT '[]',
-            config_json TEXT DEFAULT '{}',
-            created_at  INTEGER NOT NULL,
-            updated_at  INTEGER NOT NULL
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            description     TEXT DEFAULT '',
+            steps_json      TEXT NOT NULL DEFAULT '[]',
+            config_json     TEXT DEFAULT '{}',
+            variables_json  TEXT DEFAULT '[]',
+            edges_json      TEXT DEFAULT '[]',
+            positions_json  TEXT DEFAULT '{}',
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS workflow_runs (
-            id            TEXT PRIMARY KEY,
-            workflow_id   TEXT NOT NULL,
-            session_id    TEXT NOT NULL,
-            status        TEXT DEFAULT 'pending',
-            current_step  INTEGER DEFAULT 0,
-            results_json  TEXT DEFAULT '[]',
-            started_at    INTEGER,
-            finished_at   INTEGER,
-            error         TEXT,
+            id                  TEXT PRIMARY KEY,
+            workflow_id         TEXT NOT NULL,
+            session_id          TEXT NOT NULL,
+            status              TEXT DEFAULT 'pending',
+            current_step        INTEGER DEFAULT 0,
+            executing_steps_json TEXT DEFAULT '[]',
+            results_json        TEXT DEFAULT '[]',
+            started_at          INTEGER,
+            finished_at         INTEGER,
+            error               TEXT,
             FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
         );
 
@@ -77,6 +93,25 @@ def init_workflow_tables():
             ON workflow_runs(status);
     """)
     conn.commit()
+
+    # Migrate: add new columns for existing DBs
+    conn2 = _get_conn()
+    for col, default in [("variables_json", "'[]'"), ("edges_json", "'[]'"), ("positions_json", "'{}'")]:
+        try:
+            conn2.execute(f"ALTER TABLE workflows ADD COLUMN {col} TEXT DEFAULT {default}")
+            conn2.commit()
+            print(f"[WorkflowStore] Migrated: added {col} column.")
+        except Exception:
+            pass  # Column already exists
+    # Migrate workflow_runs: add executing_steps_json for parallel DAG
+    try:
+        conn2.execute("ALTER TABLE workflow_runs ADD COLUMN executing_steps_json TEXT DEFAULT '[]'")
+        conn2.commit()
+        print("[WorkflowStore] Migrated: added executing_steps_json column.")
+    except Exception:
+        pass
+    conn2.close()
+
     conn.close()
     print("[WorkflowStore] Tables initialized.")
 
@@ -90,6 +125,9 @@ def _row_to_workflow(row: sqlite3.Row) -> Dict[str, Any]:
         "description": row["description"],
         "steps": json.loads(row["steps_json"]),
         "config": json.loads(row["config_json"]),
+        "variables": json.loads(row["variables_json"] or "[]"),
+        "edges": json.loads(row["edges_json"] or "[]"),
+        "positions": json.loads(row["positions_json"] or "{}"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -100,14 +138,18 @@ def create_workflow(
     description: str = "",
     steps: Optional[List[Dict]] = None,
     config: Optional[Dict] = None,
+    variables: Optional[List[Dict]] = None,
+    edges: Optional[List[Dict]] = None,
+    positions: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     wf_id = uuid.uuid4().hex
     now = int(time.time() * 1000)
     conn = _get_conn()
     conn.execute(
-        """INSERT INTO workflows (id, name, description, steps_json, config_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (wf_id, name, description, json.dumps(steps or []), json.dumps(config or {}), now, now),
+        """INSERT INTO workflows (id, name, description, steps_json, config_json, variables_json, edges_json, positions_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (wf_id, name, description, json.dumps(steps or []), json.dumps(config or {}),
+         json.dumps(variables or []), json.dumps(edges or []), json.dumps(positions or {}), now, now),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM workflows WHERE id = ?", (wf_id,)).fetchone()
@@ -144,6 +186,9 @@ def update_workflow(
     description: Optional[str] = None,
     steps: Optional[List[Dict]] = None,
     config: Optional[Dict] = None,
+    variables: Optional[List[Dict]] = None,
+    edges: Optional[List[Dict]] = None,
+    positions: Optional[Dict] = None,
 ) -> Optional[Dict[str, Any]]:
     conn = _get_conn()
     existing = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
@@ -156,11 +201,15 @@ def update_workflow(
     new_desc = description if description is not None else existing["description"]
     new_steps = json.dumps(steps) if steps is not None else existing["steps_json"]
     new_config = json.dumps(config) if config is not None else existing["config_json"]
+    new_vars = json.dumps(variables) if variables is not None else (existing["variables_json"] or "[]")
+    new_edges = json.dumps(edges) if edges is not None else (existing["edges_json"] or "[]")
+    new_pos = json.dumps(positions) if positions is not None else (existing["positions_json"] or "{}")
 
     conn.execute(
-        """UPDATE workflows SET name=?, description=?, steps_json=?, config_json=?, updated_at=?
+        """UPDATE workflows SET name=?, description=?, steps_json=?, config_json=?, variables_json=?,
+           edges_json=?, positions_json=?, updated_at=?
            WHERE id=?""",
-        (new_name, new_desc, new_steps, new_config, now, workflow_id),
+        (new_name, new_desc, new_steps, new_config, new_vars, new_edges, new_pos, now, workflow_id),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
@@ -180,12 +229,18 @@ def delete_workflow(workflow_id: str) -> bool:
 # ─── Workflow Runs ──────────────────────────────────────
 
 def _row_to_run(row: sqlite3.Row) -> Dict[str, Any]:
+    # Handle missing executing_steps_json for older DBs
+    try:
+        executing_steps = json.loads(row["executing_steps_json"] or "[]")
+    except (KeyError, IndexError):
+        executing_steps = []
     return {
         "id": row["id"],
         "workflow_id": row["workflow_id"],
         "session_id": row["session_id"],
         "status": row["status"],
         "current_step": row["current_step"],
+        "executing_steps": executing_steps,
         "results": json.loads(row["results_json"]),
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
@@ -212,6 +267,7 @@ def update_run(
     run_id: str,
     status: Optional[str] = None,
     current_step: Optional[int] = None,
+    executing_steps: Optional[List[str]] = None,
     results: Optional[List[Dict]] = None,
     error: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -223,15 +279,16 @@ def update_run(
 
     new_status = status or existing["status"]
     new_step = current_step if current_step is not None else existing["current_step"]
+    new_exec_steps = json.dumps(executing_steps) if executing_steps is not None else (existing["executing_steps_json"] if "executing_steps_json" in existing.keys() else "[]")
     new_results = json.dumps(results) if results is not None else existing["results_json"]
     new_error = error if error is not None else existing["error"]
     finished = int(time.time() * 1000) if new_status in ("completed", "failed", "cancelled") else existing["finished_at"]
 
     conn.execute(
         """UPDATE workflow_runs
-           SET status=?, current_step=?, results_json=?, error=?, finished_at=?
+           SET status=?, current_step=?, executing_steps_json=?, results_json=?, error=?, finished_at=?
            WHERE id=?""",
-        (new_status, new_step, new_results, new_error, finished, run_id),
+        (new_status, new_step, new_exec_steps, new_results, new_error, finished, run_id),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM workflow_runs WHERE id = ?", (run_id,)).fetchone()

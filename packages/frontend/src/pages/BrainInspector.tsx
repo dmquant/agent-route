@@ -4,9 +4,9 @@ import {
   Play, Pause, RotateCcw, AlertTriangle, CheckCircle2,
   XCircle, ArrowRight, Database, Gauge, Eye,
   MessageSquare, Terminal, TrendingUp,
-  Wrench, Search, Globe, Sparkles, PenTool, FileText,
-  FolderOpen, ChevronRight, ChevronDown, Filter,
-  Radio, ExternalLink, Network, Hash, ArrowUpRight, Workflow,
+  Wrench, Globe, PenTool, FileText,
+  FolderOpen,
+  Radio, ExternalLink, Network, Hash, Workflow,
 } from 'lucide-react';
 
 const API = 'http://localhost:8000';
@@ -448,7 +448,7 @@ function ActivityDesk() {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const refreshRef = useRef<NodeJS.Timeout | null>(null);
+  const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchData = useCallback(async () => {
     try {

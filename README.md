@@ -18,7 +18,7 @@ Built on **Python FastAPI** (backend) and **React + Vite** (frontend), the syste
 | **Uniform Hand Protocol** | 5 `Hand` implementations behind a shared `execute()` interface — swap agents without code changes |
 | **Background Execution** | Sessions run as `asyncio.Task`s — switching sessions or disconnecting never kills running agents |
 | **Multi-Agent Delegation** | Fan-out prompts to N agents in parallel, join with strategies: `first_success`, `best_effort`, `majority_vote`, `all` |
-| **Workflow Engine** | Drag-and-drop workflow builder with step sequencing, agent selection, parameterized runs (input prompt + files), and session-bound execution |
+| **Workflow Engine** | Visual DAG workflow builder with ReactFlow canvas, topological execution, conditional branching, sub-workflows, and I/O port-based data flow |
 | **Cross-Session Context** | Link, fork, and share context between sessions — linked messages auto-inject into the context window |
 | **Live Observability** | Real-time execution phases (connecting → executing → streaming → finalizing) with elapsed time and output metrics |
 | **Brain Inspector** | Premium dashboard for session event streams, context utilization, and harness configurations |
@@ -94,10 +94,15 @@ agent-route/
 │   │       │   ├── Chat.tsx              # Chat + context sharing + execution
 │   │       │   ├── BrainInspector.tsx    # Event log + context viewer
 │   │       │   ├── Agents.tsx            # Agent health + skill registry
-│   │       │   ├── Workflows.tsx         # Drag-and-drop workflow builder
+│   │       │   ├── Workflows.tsx         # DAG workflow builder (Canvas + List)
 │   │       │   ├── DailyReports.tsx      # AI-generated usage analytics
 │   │       │   └── Dashboard.tsx         # Overview dashboard
 │   │       └── components/
+│   │           ├── workflow/
+│   │           │   ├── WorkflowCanvas.tsx    # ReactFlow DAG canvas + cycle detection
+│   │           │   ├── StepNode.tsx          # Custom node with execution animations
+│   │           │   ├── StepDetailPanel.tsx   # Step editor + context inspector
+│   │           │   └── types.ts             # Shared types, ports, edge schema
 │   │           ├── SessionPanel.tsx       # Session list with running indicators
 │   │           ├── WorkspacePanel.tsx     # File browser for session workspace
 │   │           └── OutputParser.tsx       # Rich markdown/code output renderer
@@ -107,8 +112,8 @@ agent-route/
 │   │       ├── main.py                   # REST + WebSocket endpoints
 │   │       ├── tasks.py                  # BackgroundTaskManager (phase lifecycle)
 │   │       ├── session_store.py          # SQLite CRUD + context links + forking
-│   │       ├── workflow_store.py         # Workflow persistence
-│   │       ├── workflow_executor.py      # Async workflow step execution
+│   │       ├── workflow_store.py         # Workflow + edge + position persistence
+│   │       ├── workflow_executor.py      # DAG executor (topo sort + linear fallback)
 │   │       ├── report_engine.py          # Daily stats aggregation
 │   │       ├── report_store.py           # Report persistence
 │   │       ├── task_analytics.py         # Execution analytics
@@ -201,7 +206,7 @@ npm run dev:frontend
 | **统一 Hand 协议** | 5 个 `Hand` 实现共享 `execute()` 接口 — 无需改代码即可切换智能体 |
 | **后台执行** | 会话作为 `asyncio.Task` 运行 — 切换会话或断开连接不会终止正在运行的智能体 |
 | **多智能体委派** | 将提示词扇出到 N 个智能体并行执行，支持四种合并策略 |
-| **工作流引擎** | 拖拽式工作流构建器，支持步骤排序、智能体选择、参数化运行（输入提示 + 文件）和会话绑定执行 |
+| **工作流引擎** | 可视化 DAG 工作流构建器，支持 ReactFlow 画布、拓扑排序执行、条件分支、子工作流和 I/O 端口数据流 |
 | **跨会话上下文** | 链接、分叉和共享会话上下文 — 链接消息自动注入上下文窗口 |
 | **实时可观测性** | 实时执行阶段 + 耗时和输出指标 |
 | **大脑检查器** | 高级仪表板，展示会话事件流、上下文利用率和 Harness 配置 |

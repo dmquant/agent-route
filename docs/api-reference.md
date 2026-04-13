@@ -627,7 +627,12 @@ Content-Type: application/json
       "prompt": "Write a summary report",
       "skills": [],
       "input_files": [],
-      "order": 1
+      "order": 1,
+      "condition": {
+        "type": "if_output_contains",
+        "value": "news",
+        "on_false": "skip"
+      }
     }
   ],
   "config": {
@@ -636,6 +641,15 @@ Content-Type: application/json
   }
 }
 ```
+
+**Step `condition` field (optional):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | `always` | `always`, `if_output_contains`, `if_output_not_contains`, `if_exit_code`, `if_file_exists` |
+| `value` | string | `""` | Comparison value (search text, exit code, or filename) |
+| `on_false` | string | `skip` | Action when condition fails: `skip`, `goto`, `stop` |
+| `goto_step` | string | `""` | Target step ID (only used with `goto`) |
 
 ### Get Workflow
 

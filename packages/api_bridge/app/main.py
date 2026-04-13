@@ -4,7 +4,7 @@ import uuid
 import asyncio
 import time as _time
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dotenv import load_dotenv
 
 # Boot Environment Configurations BEFORE importing modules that depend on env vars
@@ -352,6 +352,53 @@ def api_read_workspace_file(session_id: str, path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from fastapi.responses import FileResponse
+import mimetypes
+
+@app.get("/api/sessions/{session_id}/workspace/download")
+def api_download_workspace_file(session_id: str, path: str):
+    """Download a file from a session's workspace as binary."""
+    workspace = get_session_workspace(session_id)
+    target = os.path.join(workspace, path)
+    target = os.path.realpath(target)
+
+    if not target.startswith(os.path.realpath(workspace)):
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    filename = os.path.basename(target)
+    media_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
+    return FileResponse(
+        path=target,
+        filename=filename,
+        media_type=media_type,
+    )
+
+@app.delete("/api/sessions/{session_id}/workspace/file")
+def api_delete_workspace_file(session_id: str, path: str):
+    """Delete a file from a session's workspace."""
+    workspace = get_session_workspace(session_id)
+    target = os.path.join(workspace, path)
+    target = os.path.realpath(target)
+
+    if not target.startswith(os.path.realpath(workspace)):
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    if not os.path.exists(target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    import shutil
+    try:
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+        return {"deleted": True, "path": path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ---------------------------------------------
 # 3a. Agent & Skills Discovery
 # ---------------------------------------------
@@ -466,6 +513,66 @@ async def api_brain_delegate(session_id: str, req: DelegateRequest):
         workspace_dir=workspace_dir,
     )
     return result
+
+# --- Multi-Agent Delegation Endpoints (Phase 9) ---
+
+class FanOutRequest(BaseModel):
+    agents: List[str]
+    prompt: str
+    workspace_dir: Optional[str] = None
+    timeout: float = 300.0
+
+@app.post("/api/brain/{session_id}/fan-out")
+async def api_brain_fan_out(session_id: str, req: FanOutRequest):
+    """Dispatch the same prompt to multiple agents in parallel.
+    
+    Each agent gets its own isolated sub-workspace (_fanout_{agent}).
+    Returns a list of results, one per agent, in the same order.
+    """
+    workspace_dir = req.workspace_dir or get_session_workspace(session_id)
+    results = await orchestrator.fan_out(
+        session_id, req.agents, req.prompt,
+        workspace_dir=workspace_dir,
+        timeout=req.timeout,
+    )
+    return {
+        "session_id": session_id,
+        "agents": req.agents,
+        "results": results,
+        "success_count": sum(1 for r in results if r.get("success")),
+        "total": len(results),
+    }
+
+class MultiAgentRequest(BaseModel):
+    agents: List[str]
+    prompt: str
+    strategy: str = "first_success"  # all | first_success | majority_vote | best_effort
+    workspace_dir: Optional[str] = None
+    timeout: float = 300.0
+
+@app.post("/api/brain/{session_id}/multi-agent")
+async def api_brain_multi_agent(session_id: str, req: MultiAgentRequest):
+    """Fan-out to multiple agents, then join results with a merge strategy.
+    
+    Strategies:
+    - all: Return all results
+    - first_success: Return the first agent that succeeds
+    - majority_vote: Majority-wins by exit code
+    - best_effort: Return successful results, fallback to any
+    """
+    workspace_dir = req.workspace_dir or get_session_workspace(session_id)
+    merged = await orchestrator.multi_agent_run(
+        session_id, req.agents, req.prompt,
+        workspace_dir=workspace_dir,
+        strategy=req.strategy,
+        timeout=req.timeout,
+    )
+    return {
+        "session_id": session_id,
+        "agents": req.agents,
+        "strategy": req.strategy,
+        **merged,
+    }
 
 @app.get("/api/brain/{session_id}/status")
 def api_brain_status(session_id: str):
@@ -676,6 +783,9 @@ class WorkflowCreateRequest(BaseModel):
     description: str = ""
     steps: list = []
     config: dict = {}
+    variables: list = []  # [{name, label, type, default, required}]
+    edges: list = []      # DAG edges [{id, source, sourceHandle, target, targetHandle, condition?}]
+    positions: dict = {}  # Node positions {step_id: {x, y}}
 
 
 class WorkflowUpdateRequest(BaseModel):
@@ -683,6 +793,9 @@ class WorkflowUpdateRequest(BaseModel):
     description: Optional[str] = None
     steps: Optional[list] = None
     config: Optional[dict] = None
+    variables: Optional[list] = None
+    edges: Optional[list] = None
+    positions: Optional[dict] = None
 
 
 class WorkflowInputFile(BaseModel):
@@ -696,6 +809,7 @@ class WorkflowRunRequest(BaseModel):
     session_title: Optional[str] = None
     input_prompt: Optional[str] = None  # Additional prompt injected into first step
     input_files: Optional[List[WorkflowInputFile]] = None  # Files written to workspace before run
+    variables: Optional[Dict[str, str]] = None  # Variable values: {"TICKER": "AAPL", "DATE": "2026-04-12"}
 
 
 @app.get("/api/workflows")
@@ -710,6 +824,9 @@ def api_create_workflow(req: WorkflowCreateRequest):
         description=req.description,
         steps=req.steps,
         config=req.config,
+        variables=req.variables,
+        edges=req.edges,
+        positions=req.positions,
     )
     return wf
 
@@ -730,6 +847,9 @@ def api_update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
         description=req.description,
         steps=req.steps,
         config=req.config,
+        variables=req.variables,
+        edges=req.edges,
+        positions=req.positions,
     )
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -772,11 +892,15 @@ async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
 
     run = create_run(workflow_id=workflow_id, session_id=session_id)
 
+    # Resolve variables: merge defaults from workflow definition with run-time overrides
+    resolved_vars = _resolve_variables(wf.get("variables", []), req.variables or {})
+
     await workflow_executor.start_workflow(
         run_id=run["id"],
         workflow=wf,
         session_id=session_id,
         input_prompt=req.input_prompt,
+        variables=resolved_vars,
     )
 
     return {
@@ -812,6 +936,7 @@ class SessionWorkflowRunRequest(BaseModel):
     workflow_id: str
     input_prompt: Optional[str] = None
     input_files: Optional[List[WorkflowInputFile]] = None
+    variables: Optional[Dict[str, str]] = None  # Variable values overrides
 
 
 def _write_input_files(workspace: str, files: List[WorkflowInputFile]):
@@ -830,13 +955,41 @@ def _write_input_files(workspace: str, files: List[WorkflowInputFile]):
                 fh.write(f.content_text)
 
 
+def _resolve_variables(
+    variable_defs: List[Dict], overrides: Dict[str, str]
+) -> Dict[str, str]:
+    """Resolve workflow variables by merging defaults with run-time overrides.
+
+    Args:
+        variable_defs: [{name, label, type, default, required}] from workflow definition
+        overrides: {name: value} provided at run time
+
+    Returns:
+        {name: resolved_value} dict ready for substitution
+    """
+    resolved = {}
+    for v in variable_defs:
+        name = v.get("name", "")
+        if not name:
+            continue
+        # Use override if provided, otherwise fall back to default
+        if name in overrides:
+            resolved[name] = str(overrides[name])
+        elif "default" in v and v["default"] is not None:
+            resolved[name] = str(v["default"])
+        elif v.get("required", False):
+            # Required variable with no default and no override — use empty string
+            resolved[name] = ""
+    return resolved
+
+
 @app.post("/api/sessions/{session_id}/run-workflow")
 async def api_run_workflow_in_session(session_id: str, req: SessionWorkflowRunRequest):
     """Run a saved workflow within an existing session.
     
     This allows the Chat/Workspace interface to trigger workflow execution
     using the same session context, workspace, and message history.
-    Accepts optional input_prompt and input_files.
+    Accepts optional input_prompt, input_files, and variables.
     """
     session = get_session(session_id)
     if not session:
@@ -853,11 +1006,15 @@ async def api_run_workflow_in_session(session_id: str, req: SessionWorkflowRunRe
 
     run = create_run(workflow_id=req.workflow_id, session_id=session_id)
 
+    # Resolve variables
+    resolved_vars = _resolve_variables(wf.get("variables", []), req.variables or {})
+
     await workflow_executor.start_workflow(
         run_id=run["id"],
         workflow=wf,
         session_id=session_id,
         input_prompt=req.input_prompt,
+        variables=resolved_vars,
     )
 
     return {

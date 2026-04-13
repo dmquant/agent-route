@@ -102,3 +102,78 @@ body {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.4);
 }
+
+/* ReactFlow light canvas theme */
+.react-flow {
+  --xy-background-color: #fafbfc;
+  --xy-minimap-background-color: #f1f5f9;
+  --xy-controls-button-background-color: #ffffff;
+  --xy-controls-button-color: #374151;
+  --xy-controls-button-border-color: #e5e7eb;
+  --xy-edge-stroke-default: #cbd5e1;
+  --xy-edge-stroke-width-default: 2;
+  --xy-node-border-radius-default: 12px;
+}
+
+.react-flow__controls button {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.react-flow__controls button:hover {
+  background-color: #eef2ff !important;
+}
+.react-flow__controls button svg {
+  fill: #374151;
+}
+.react-flow__edge-path {
+  stroke-linecap: round;
+}
+.react-flow__handle {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.react-flow__handle:hover {
+  transform: scale(1.4);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2), 0 0 8px rgba(99, 102, 241, 0.15);
+}
+
+/* MiniMap node colors */
+.react-flow__minimap-node {
+  fill: #94a3b8 !important;
+  stroke: #e2e8f0 !important;
+  rx: 4;
+}
+
+/* ─── DAG Execution Animations ─── */
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes dash-flow {
+  0% { stroke-dashoffset: 24; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes slideDown {
+  0% { opacity: 0; transform: translate(-50%, -12px); }
+  100% { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Cycle-involved nodes get a red pulsing border */
+.cycle-node .react-flow__node {
+  border-color: rgba(248, 113, 113, 0.5) !important;
+  animation: cycle-pulse 2s ease-in-out infinite;
+}
+
+@keyframes cycle-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0); }
+  50% { box-shadow: 0 0 12px 2px rgba(248, 113, 113, 0.2); }
+}
+
+/* Connection line styling */
+.react-flow__connection-line {
+  stroke: #6366f1;
+  stroke-width: 2;
+  stroke-dasharray: 5 5;
+}
+

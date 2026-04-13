@@ -353,7 +353,7 @@ Each phase transition is broadcast to all WebSocket subscribers.
 
 > `packages/api_bridge/app/workflow_store.py` + `workflow_executor.py`
 
-The Workflow Engine enables multi-step, multi-agent orchestration with drag-and-drop UI support.
+The Workflow Engine enables multi-step, multi-agent orchestration with a **visual DAG canvas** and **dual-mode execution** (DAG + linear fallback).
 
 ### Data Model
 
@@ -368,24 +368,62 @@ The Workflow Engine enables multi-step, multi-agent orchestration with drag-and-
       "agent": "gemini",
       "prompt": "Research the latest AI news",
       "skills": ["web_search"],
-      "input_files": [],
-      "order": 0
+      "inputs": [{"id": "input", "label": "Input", "type": "context"}],
+      "outputs": [{"id": "output", "label": "Output", "type": "text"}]
     },
     {
       "id": "step_2", 
       "agent": "claude",
       "prompt": "Synthesize a report from the research",
-      "skills": [],
-      "input_files": ["research_output.md"],
-      "order": 1
+      "inputs": [{"id": "input", "label": "Input", "type": "context"}],
+      "outputs": [{"id": "output", "label": "Output", "type": "text"}]
     }
   ],
+  "edges": [
+    {
+      "id": "edge_1",
+      "source": "step_1",
+      "target": "step_2",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    }
+  ],
+  "positions": {
+    "step_1": {"x": 100, "y": 200},
+    "step_2": {"x": 500, "y": 200}
+  },
   "config": {
     "timeout_per_step": 7200,
     "stop_on_failure": true
   }
 }
 ```
+
+### Dual-Mode Execution
+
+```
+Workflow has edges?
+  ├─ YES → DAG Mode (Parallel, Level-Based)
+  │   ├─ Validate: cycle detection
+  │   ├─ Build topological levels via Kahn's algorithm
+  │   ├─ For each level:
+  │   │   ├─ Fan-out: asyncio.gather() all steps in level
+  │   │   ├─ Fan-in: collect results, update context
+  │   │   └─ Check for failures before next level
+  │   └─ Resolve parent outputs → child inputs via context
+  │
+  └─ NO → Linear Mode (backward compatible)
+      └─ Execute steps in array order
+```
+
+The DAG executor:
+1. **Validates** the graph for cycles before execution
+2. **Groups** steps into topological levels using `topological_levels()` (modified Kahn's algorithm)
+3. **Executes levels in parallel** — steps within the same level run concurrently via `asyncio.gather()`
+4. **Resolves inputs** by collecting parent step outputs and injecting them into the child step's prompt
+5. **Stores outputs** in a shared `context` dictionary keyed by step ID (safe because parents always complete before children)
+6. **Tracks parallel state** via `executing_steps` field, enabling the frontend to animate multiple nodes simultaneously
+7. **Supports sub-workflows** via `agent: "sub_workflow"` steps that recursively execute child flows
 
 ### Execution Flow
 
@@ -394,17 +432,22 @@ User clicks "Run Workflow"
   ├─ (Option A) New Session created automatically
   └─ (Option B) Existing session reused
       │
-  ┌───▼────────────────────────────────┐
-  │ workflow_executor.start_workflow()  │
-  │   ├─ Create run record             │
-  │   ├─ For each step (sequential):   │
-  │   │   ├─ Log step start to session │
-  │   │   ├─ Execute via Hand Protocol │
-  │   │   ├─ Log output to session     │
-  │   │   ├─ Upload generated files    │
-  │   │   └─ Update run progress       │
-  │   └─ Mark run completed/failed     │
-  └────────────────────────────────────┘
+  ┌───▼──────────────────────────────────┐
+  │ workflow_executor.start_workflow()    │
+  │   ├─ Create run record               │
+  │   ├─ Detect mode (DAG vs Linear)     │
+  │   ├─ If DAG: build topological levels│
+  │   ├─ For each level:                 │
+  │   │   ├─ Set executing_steps = [ids] │
+  │   │   ├─ asyncio.gather(*steps)      │
+  │   │   │   ├─ Resolve parent outputs  │
+  │   │   │   ├─ Evaluate condition      │
+  │   │   │   ├─ Execute via Hand Proto  │
+  │   │   │   └─ Return step result      │
+  │   │   ├─ Collect results, update ctx │
+  │   │   └─ Clear executing_steps       │
+  │   └─ Mark run completed/failed       │
+  └──────────────────────────────────────┘
 ```
 
 ### Session Integration
@@ -414,6 +457,16 @@ Workflow execution happens **inside a session**, meaning:
 - Workspace files are shared across steps
 - Brain Inspector shows workflow event logs
 - Context Engine can replay full workflow history
+
+### Visual Canvas
+
+The frontend provides a **ReactFlow-based DAG canvas** with:
+- Custom `StepNode` components with execution animations
+- Custom `DataFlowEdge` with smooth-step paths and glow effects
+- Client-side cycle detection preventing invalid connections
+- DAG Info panel showing nodes/edges/validation/progress
+- Context Inspector in the Step Detail Panel
+- Dual-view toggle between Canvas and List modes
 
 ---
 
@@ -519,7 +572,7 @@ All state is persisted to a single SQLite database (`sessions.db`).
 | `messages` | Chat messages | `id`, `session_id`, `source`, `content`, `agent_type`, `image_b64` |
 | `session_events` | Durable event log | `id`, `session_id`, `event_type`, `agent`, `content`, `metadata` |
 | `session_context_links` | Cross-session links | `id`, `source_session_id`, `target_session_id`, `link_type` |
-| `workflows` | Saved workflow definitions | `id`, `name`, `description`, `steps` (JSON), `config` (JSON) |
+| `workflows` | Saved workflow definitions | `id`, `name`, `description`, `steps` (JSON), `edges_json`, `positions_json`, `variables_json`, `config` (JSON) |
 | `workflow_runs` | Workflow execution records | `id`, `workflow_id`, `session_id`, `status`, `progress` |
 | `reports` | AI-generated daily reports | `id`, `date`, `agent`, `content`, `stats` (JSON) |
 | `sandboxes` | Workspace tracking | `id`, `session_id`, `path`, `ttl_seconds`, `expires_at` |

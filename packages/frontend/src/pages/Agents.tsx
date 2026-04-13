@@ -43,6 +43,11 @@ interface Agent {
   skill_count: number;
 }
 
+interface HandHealthStatus {
+  healthy: boolean;
+  enabled: boolean;
+}
+
 const ICON_MAP: Record<string, any> = {
   sparkles: Sparkles,
   brain: Brain,
@@ -101,10 +106,21 @@ function SkillCard({ skill }: { skill: Skill }) {
 }
 
 // ─── Agent Card ──────────────────────
-function AgentCard({ agent }: { agent: Agent }) {
+function AgentCard({ agent, health }: { agent: Agent; health?: HandHealthStatus }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = ICON_MAP[agent.icon] || Zap;
   const isCloud = agent.class === 'cloud';
+
+  // Determine runtime status: prefer health check data over static config
+  const isHealthy = health ? health.healthy : agent.status === 'active';
+  const isEnabled = health ? health.enabled : agent.status === 'active';
+  const statusLabel = !isEnabled ? 'Disabled' : isHealthy ? 'Online' : 'Offline';
+  const statusColor = !isEnabled
+    ? 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400'
+    : isHealthy
+      ? 'bg-green-500/10 border-green-500/20 text-green-400'
+      : 'bg-red-500/10 border-red-500/20 text-red-400';
+  const StatusIcon = !isEnabled ? X : isHealthy ? Check : X;
 
   return (
     <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all">
@@ -136,13 +152,9 @@ function AgentCard({ agent }: { agent: Agent }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full border ${
-              agent.status === 'active'
-                ? 'bg-green-500/10 border-green-500/20 text-green-400'
-                : 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400'
-            }`}>
-              {agent.status === 'active' ? <Check className="w-3 h-3" /> : <X className="w-3 h-3" />}
-              {agent.status === 'active' ? 'Active' : 'Disabled'}
+            <span className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full border ${statusColor}`}>
+              <StatusIcon className="w-3 h-3" />
+              {statusLabel}
             </span>
           </div>
         </div>
@@ -222,7 +234,7 @@ function AgentCard({ agent }: { agent: Agent }) {
 // ─── Main Page ──────────────────────
 export function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [handHealth, setHandHealth] = useState<Record<string, boolean>>({});
+  const [handHealth, setHandHealth] = useState<Record<string, HandHealthStatus>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'cloud' | 'local'>('all');
 
@@ -248,7 +260,10 @@ export function Agents() {
 
   const filtered = filter === 'all' ? agents : agents.filter(a => a.class === filter);
   const totalSkills = agents.reduce((sum, a) => sum + a.skill_count, 0);
-  const activeCount = agents.filter(a => a.status === 'active').length;
+  const activeCount = agents.filter(a => {
+    const h = handHealth[a.id];
+    return h ? (h.enabled && h.healthy) : a.status === 'active';
+  }).length;
 
   return (
     <div className="p-8 h-full overflow-y-auto z-10 relative">
@@ -277,7 +292,7 @@ export function Agents() {
             { label: 'Cloud Agents', value: agents.filter(a => a.class === 'cloud').length, sub: 'CLI-based', color: 'text-sky-400' },
             { label: 'Local Models', value: agents.filter(a => a.class === 'local').length, sub: 'Self-hosted', color: 'text-emerald-400' },
             { label: 'Total Skills', value: totalSkills, sub: 'Across all agents', color: 'text-indigo-400' },
-            { label: 'Hands Online', value: Object.values(handHealth).filter(Boolean).length, sub: `of ${Object.keys(handHealth).length} registered`, color: 'text-amber-400' },
+            { label: 'Hands Online', value: Object.values(handHealth).filter(h => h.healthy).length, sub: `of ${Object.keys(handHealth).length} registered`, color: 'text-amber-400' },
           ].map(stat => (
             <div key={stat.label} className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-4">
               <div className={`text-2xl font-bold ${stat.color}`}>{stat.value}</div>
@@ -291,10 +306,14 @@ export function Agents() {
         <div className="flex items-center gap-3 bg-card/30 backdrop-blur-md border border-border/30 rounded-lg px-4 py-2.5">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Hand Protocol</span>
           <div className="h-3 w-px bg-border/50" />
-          {Object.entries(handHealth).map(([name, healthy]) => (
+          {Object.entries(handHealth).map(([name, status]) => (
             <div key={name} className="flex items-center gap-1.5 text-xs">
-              <span className={`w-1.5 h-1.5 rounded-full ${healthy ? 'bg-green-400' : 'bg-red-400'}`} />
-              <span className={`font-medium capitalize ${healthy ? 'text-foreground/80' : 'text-red-400'}`}>{name}</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                !status.enabled ? 'bg-zinc-500' : status.healthy ? 'bg-green-400' : 'bg-red-400'
+              }`} />
+              <span className={`font-medium capitalize ${
+                !status.enabled ? 'text-zinc-500' : status.healthy ? 'text-foreground/80' : 'text-red-400'
+              }`}>{name}</span>
             </div>
           ))}
         </div>
@@ -324,7 +343,7 @@ export function Agents() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {filtered.map(agent => (
-              <AgentCard key={agent.id} agent={agent} />
+              <AgentCard key={agent.id} agent={agent} health={handHealth[agent.id]} />
             ))}
           </div>
         )}

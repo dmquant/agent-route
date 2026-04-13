@@ -35,15 +35,36 @@ class HandRegistry:
         """Serializable list of hand metadata."""
         return [h.info() for h in self._hands.values()]
 
-    async def health_check_all(self) -> Dict[str, bool]:
-        """Check health of all registered hands concurrently."""
-        results = {}
+    async def health_check_all(self) -> Dict[str, dict]:
+        """Check health of all registered hands concurrently.
+        
+        Returns a dict like: {"gemini": {"healthy": True, "enabled": True}, ...}
+        - enabled: Whether the agent route is enabled in .env
+        - healthy: Whether the hand binary/service is actually reachable
+        """
+        import os
+
+        _ENV_GATES = {
+            "gemini": "ENABLE_GEMINI_CLI",
+            "claude": "ENABLE_CLAUDE_REMOTE_CONTROL",
+            "codex": "ENABLE_CODEX_SERVER",
+            "ollama": "ENABLE_OLLAMA_API",
+            "mflux": "ENABLE_MFLUX_IMAGE",
+        }
+
+        results: Dict[str, dict] = {}
 
         async def check_one(name: str, hand: Hand):
+            env_key = _ENV_GATES.get(name, "")
+            enabled = os.getenv(env_key) == "true" if env_key else True
+            if not enabled:
+                results[name] = {"healthy": False, "enabled": False}
+                return
             try:
-                results[name] = await asyncio.wait_for(hand.health_check(), timeout=10)
+                healthy = await asyncio.wait_for(hand.health_check(), timeout=10)
+                results[name] = {"healthy": healthy, "enabled": True}
             except Exception:
-                results[name] = False
+                results[name] = {"healthy": False, "enabled": True}
 
         await asyncio.gather(
             *[check_one(n, h) for n, h in self._hands.items()]

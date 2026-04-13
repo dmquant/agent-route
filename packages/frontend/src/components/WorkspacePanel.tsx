@@ -3,7 +3,7 @@ import {
   FolderOpen, FileText, ChevronRight, ChevronDown,
   RefreshCw, FileCode, FileImage, FileJson, File,
   PanelRightClose, FolderClosed,
-  X, Copy, Check
+  X, Copy, Check, Download, Trash2
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -54,16 +54,19 @@ function FileViewer({
   sessionId,
   filePath,
   onClose,
+  onDelete,
 }: {
   sessionId: string;
   filePath: string;
   onClose: () => void;
+  onDelete?: (path: string) => void;
 }) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [truncated, setTruncated] = useState(false);
   const [fileSize, setFileSize] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -86,6 +89,26 @@ function FileViewer({
     }
   };
 
+  const handleDownload = () => {
+    window.open(
+      `${API_BASE}/api/sessions/${sessionId}/workspace/download?path=${encodeURIComponent(filePath)}`,
+      '_blank'
+    );
+  };
+
+  const handleDelete = async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/sessions/${sessionId}/workspace/file?path=${encodeURIComponent(filePath)}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) {
+        onDelete?.(filePath);
+        onClose();
+      }
+    } catch { /* ignore */ }
+  };
+
   const fileName = filePath.split('/').pop() || filePath;
   const ext = fileName.split('.').pop() || '';
 
@@ -98,7 +121,7 @@ function FileViewer({
           <span className="text-xs font-medium truncate">{fileName}</span>
           <span className="text-[10px] text-muted-foreground">{formatSize(fileSize)}</span>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-0.5 shrink-0">
           <button
             onClick={handleCopy}
             className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
@@ -107,8 +130,32 @@ function FileViewer({
             {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
           <button
-            onClick={onClose}
+            onClick={handleDownload}
             className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+            title="Download file"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+          {!confirmDelete ? (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="p-1 rounded hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors"
+              title="Delete file"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+            <button
+              onClick={handleDelete}
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+              title="Click to confirm delete"
+            >
+              Confirm
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors ml-0.5"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -125,6 +172,11 @@ function FileViewer({
         ) : truncated ? (
           <div className="text-xs text-muted-foreground text-center py-8">
             File too large to preview ({formatSize(fileSize)})
+            <div className="mt-3">
+              <button onClick={handleDownload} className="text-blue-400 hover:text-blue-300 flex items-center gap-1 mx-auto">
+                <Download className="w-3.5 h-3.5" /> Download instead
+              </button>
+            </div>
           </div>
         ) : (
           <pre className="text-[11px] leading-relaxed text-foreground/80 font-mono whitespace-pre-wrap break-all">
@@ -161,6 +213,16 @@ function DirectoryNode({
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [sessionId, entry.path, children.length, loading]);
+
+  const reload = useCallback(() => {
+    setChildren([]);
+    setLoading(true);
+    fetch(`${API_BASE}/api/sessions/${sessionId}/workspace?path=${encodeURIComponent(entry.path)}`)
+      .then(r => r.json())
+      .then(data => setChildren(data.files || []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [sessionId, entry.path]);
 
   const toggle = () => {
     if (!expanded) load();
@@ -209,7 +271,7 @@ function DirectoryNode({
                   onFileClick={onFileClick}
                 />
               ) : (
-                <FileNode key={child.path} entry={child} depth={depth + 1} onClick={() => onFileClick(child.path)} />
+                <FileNode key={child.path} entry={child} depth={depth + 1} onClick={() => onFileClick(child.path)} sessionId={sessionId} onDelete={reload} />
               )
             )
           )}
@@ -224,11 +286,37 @@ function FileNode({
   entry,
   depth,
   onClick,
+  sessionId,
+  onDelete,
 }: {
   entry: FileEntry;
   depth: number;
   onClick: () => void;
+  sessionId?: string;
+  onDelete?: () => void;
 }) {
+  const handleDownload = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (sessionId) {
+      window.open(
+        `${API_BASE}/api/sessions/${sessionId}/workspace/download?path=${encodeURIComponent(entry.path)}`,
+        '_blank'
+      );
+    }
+  };
+
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!sessionId || !confirm(`Delete ${entry.name}?`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/sessions/${sessionId}/workspace/file?path=${encodeURIComponent(entry.path)}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) onDelete?.();
+    } catch { /* ignore */ }
+  };
+
   return (
     <button
       onClick={onClick}
@@ -237,8 +325,32 @@ function FileNode({
     >
       {getFileIcon(entry.extension || '')}
       <span className="text-xs truncate flex-1">{entry.name}</span>
-      <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-        {entry.size !== undefined ? formatSize(entry.size) : ''}
+      <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+        {entry.size !== undefined && (
+          <span className="text-[10px] text-muted-foreground mr-1">
+            {formatSize(entry.size)}
+          </span>
+        )}
+        {sessionId && (
+          <>
+            <span
+              role="button"
+              onClick={handleDownload}
+              className="p-0.5 rounded hover:bg-blue-500/10 text-muted-foreground/50 hover:text-blue-400 transition-colors"
+              title="Download"
+            >
+              <Download className="w-3 h-3" />
+            </span>
+            <span
+              role="button"
+              onClick={handleDelete}
+              className="p-0.5 rounded hover:bg-red-500/10 text-muted-foreground/50 hover:text-red-400 transition-colors"
+              title="Delete"
+            >
+              <Trash2 className="w-3 h-3" />
+            </span>
+          </>
+        )}
       </span>
     </button>
   );
@@ -250,6 +362,7 @@ export function WorkspacePanel({ sessionId, isOpen, onToggle }: WorkspacePanelPr
   const [loading, setLoading] = useState(false);
   const [workspaceDir, setWorkspaceDir] = useState('');
   const [viewingFile, setViewingFile] = useState<string | null>(null);
+  const [fileCount, setFileCount] = useState(0);
 
   const loadRoot = useCallback(() => {
     if (!sessionId) return;
@@ -259,6 +372,7 @@ export function WorkspacePanel({ sessionId, isOpen, onToggle }: WorkspacePanelPr
       .then(data => {
         setFiles(data.files || []);
         setWorkspaceDir(data.workspace_dir || '');
+        setFileCount((data.files || []).length);
       })
       .catch(() => setFiles([]))
       .finally(() => setLoading(false));
@@ -291,6 +405,11 @@ export function WorkspacePanel({ sessionId, isOpen, onToggle }: WorkspacePanelPr
           <span className="text-xs font-semibold tracking-wide uppercase text-foreground/70">
             Workspace
           </span>
+          {fileCount > 0 && (
+            <span className="text-[10px] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-full">
+              {fileCount}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <button
@@ -355,6 +474,8 @@ export function WorkspacePanel({ sessionId, isOpen, onToggle }: WorkspacePanelPr
                 entry={entry}
                 depth={0}
                 onClick={() => setViewingFile(entry.path)}
+                sessionId={sessionId!}
+                onDelete={loadRoot}
               />
             )
           )
@@ -367,6 +488,7 @@ export function WorkspacePanel({ sessionId, isOpen, onToggle }: WorkspacePanelPr
           sessionId={sessionId}
           filePath={viewingFile}
           onClose={() => setViewingFile(null)}
+          onDelete={() => { setViewingFile(null); loadRoot(); }}
         />
       )}
     </div>

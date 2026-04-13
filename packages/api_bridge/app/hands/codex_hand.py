@@ -119,7 +119,8 @@ class CodexHand(Hand):
         return HandResult(output=output_text or f"Exit code {exit_code}", exit_code=exit_code)
 
     async def health_check(self) -> bool:
-        return shutil.which("npx") is not None
+        path = resolve_cli_path("npx")
+        return path != "npx" and os.path.isfile(path)
 
     async def _ensure_git(self, workspace_dir: str):
         git_dir = os.path.join(workspace_dir, '.git')

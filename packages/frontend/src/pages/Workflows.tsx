@@ -3,97 +3,28 @@ import {
   Plus, ArrowRight, GitMerge, Play, Save, Trash2, GripVertical,
   Sparkles, Brain, Code, Server, Image, ChevronDown, ChevronRight as ChevronRightIcon,
   FileText, X, Loader2, CheckCircle2, XCircle,
-  Clock, AlertTriangle, Zap,
-  ArrowDown, BookOpen, History,
+  Clock, AlertTriangle, Zap, Variable,
+  ArrowDown, BookOpen, History, GitBranch, SkipForward,
+  LayoutGrid, Network,
 } from 'lucide-react';
+import WorkflowCanvas from '../components/workflow/WorkflowCanvas';
+import StepDetailPanel from '../components/workflow/StepDetailPanel';
+import {
+  type WorkflowStep, type WorkflowEdge, type WorkflowVariable,
+  type Workflow, type WorkflowRun, type StepResult,
+  type AgentInfo, type SessionInfo,
+  AGENT_COLORS, defaultStep, DEFAULT_PORTS,
+} from '../components/workflow/types';
 
 const API = 'http://localhost:8000';
 
-// ─── Types ──────────────────────
-interface WorkflowStep {
-  id: string;
-  name: string;
-  agent: string;
-  prompt: string;
-  skills: string[];
-  inputFiles: string[];
-  config: {
-    timeout: number;
-    continue_on_error: boolean;
-  };
-}
-
-interface Workflow {
-  id: string;
-  name: string;
-  description: string;
-  steps: WorkflowStep[];
-  config: Record<string, any>;
-  created_at: number;
-  updated_at: number;
-  run_count?: number;
-}
-
-interface WorkflowRun {
-  id: string;
-  workflow_id: string;
-  session_id: string;
-  status: string;
-  current_step: number;
-  results: StepResult[];
-  started_at: number;
-  finished_at: number | null;
-  error: string | null;
-}
-
-interface StepResult {
-  step_id: string;
-  step_index: number;
-  agent: string;
-  status: string;
-  output?: string;
-  error?: string;
-  latency_ms?: number;
-  started_at: number;
-  finished_at: number;
-}
-
-interface AgentInfo {
-  id: string;
-  name: string;
-  color: string;
-  icon: string;
-  capabilities: string[];
-  skills: { id: string; name: string; description: string }[];
-  status: string;
-}
-
-interface SessionInfo {
-  id: string;
-  title: string;
-  agent_type: string;
-  message_count: number;
-}
-
-const AGENT_COLORS: Record<string, string> = {
-  gemini: '#4285f4', claude: '#d97706', codex: '#10b981',
-  ollama: '#8b5cf6', mflux: '#ec4899',
-};
+// ─── Types re-exported from shared module ──────────────────────
+// All type definitions are in ../components/workflow/types.ts
 
 const AGENT_ICONS: Record<string, any> = {
   gemini: Sparkles, claude: Brain, codex: Code,
-  ollama: Server, mflux: Image,
+  ollama: Server, mflux: Image, sub_workflow: GitMerge,
 };
-
-const defaultStep = (): WorkflowStep => ({
-  id: crypto.randomUUID(),
-  name: '',
-  agent: 'gemini',
-  prompt: '',
-  skills: [],
-  inputFiles: [],
-  config: { timeout: 3600, continue_on_error: false },
-});
 
 // ─── Step Card ──────────────────────
 function StepCard({
@@ -115,14 +46,19 @@ function StepCard({
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showSkills, setShowSkills] = useState(false);
+  const [showCondition, setShowCondition] = useState(
+    step.condition && step.condition.type !== 'always'
+  );
   const agent = agents.find(a => a.id === step.agent);
   const AgentIcon = AGENT_ICONS[step.agent] || Zap;
   const color = AGENT_COLORS[step.agent] || '#6b7280';
+  const hasCondition = step.condition && step.condition.type !== 'always';
 
   const statusIcon = stepResult ? (
     stepResult.status === 'success' ? <CheckCircle2 className="w-4 h-4 text-green-400" /> :
     stepResult.status === 'error' ? <XCircle className="w-4 h-4 text-red-400" /> :
     stepResult.status === 'timeout' ? <Clock className="w-4 h-4 text-amber-400" /> :
+    stepResult.status === 'skipped' ? <SkipForward className="w-4 h-4 text-gray-400" /> :
     null
   ) : isExecuting ? <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" /> : null;
 
@@ -163,6 +99,7 @@ function StepCard({
           />
         </div>
         <div className="flex items-center gap-1">
+          {hasCondition && <span title="Conditional step"><GitBranch className="w-3 h-3 text-amber-400" /></span>}
           {statusIcon}
           {stepResult?.latency_ms && (
             <span className="text-[10px] text-muted-foreground tabular-nums">{(stepResult.latency_ms / 1000).toFixed(1)}s</span>
@@ -324,6 +261,96 @@ function StepCard({
             </div>
           </div>
 
+          {/* Condition Editor (Conditional Branching) */}
+          <div>
+            <button
+              onClick={() => setShowCondition(!showCondition)}
+              className={`flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider transition-colors ${
+                hasCondition ? 'text-amber-400 hover:text-amber-300' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <GitBranch className="w-3 h-3" />
+              Condition {hasCondition && <span className="text-[9px] px-1 py-0 rounded bg-amber-500/15 text-amber-400 normal-case capitalize">{step.condition?.type.replace('if_', '').replace(/_/g, ' ')}</span>}
+              <ChevronDown className={`w-3 h-3 transition-transform ${showCondition ? '' : '-rotate-90'}`} />
+            </button>
+            {showCondition && (
+              <div className="mt-2 p-3 bg-amber-500/5 border border-amber-500/10 rounded-lg space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">When to run</label>
+                    <select
+                      value={step.condition?.type || 'always'}
+                      onChange={e => onUpdate({
+                        ...step,
+                        condition: { ...(step.condition || { value: '', on_false: 'skip', goto_step: '' }), type: e.target.value as any }
+                      })}
+                      className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground outline-none"
+                    >
+                      <option value="always">Always run</option>
+                      <option value="if_output_contains">If prev output contains...</option>
+                      <option value="if_output_not_contains">If prev output NOT contains...</option>
+                      <option value="if_exit_code">If prev exit code equals...</option>
+                      <option value="if_file_exists">If file exists in workspace...</option>
+                    </select>
+                  </div>
+                  {step.condition?.type !== 'always' && (
+                    <div>
+                      <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">
+                        {step.condition?.type === 'if_exit_code' ? 'Exit code' :
+                         step.condition?.type === 'if_file_exists' ? 'Filename' : 'Search text'}
+                      </label>
+                      <input
+                        value={step.condition?.value || ''}
+                        onChange={e => onUpdate({
+                          ...step,
+                          condition: { ...step.condition!, value: e.target.value }
+                        })}
+                        placeholder={
+                          step.condition?.type === 'if_exit_code' ? '0' :
+                          step.condition?.type === 'if_file_exists' ? 'report.md' : 'success'
+                        }
+                        className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-amber-500/50"
+                      />
+                    </div>
+                  )}
+                </div>
+                {step.condition?.type !== 'always' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">If condition fails</label>
+                      <select
+                        value={step.condition?.on_false || 'skip'}
+                        onChange={e => onUpdate({
+                          ...step,
+                          condition: { ...step.condition!, on_false: e.target.value as any }
+                        })}
+                        className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground outline-none"
+                      >
+                        <option value="skip">Skip this step</option>
+                        <option value="goto">Jump to step...</option>
+                        <option value="stop">Stop workflow</option>
+                      </select>
+                    </div>
+                    {step.condition?.on_false === 'goto' && (
+                      <div>
+                        <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">Goto step ID</label>
+                        <input
+                          value={step.condition?.goto_step || ''}
+                          onChange={e => onUpdate({
+                            ...step,
+                            condition: { ...step.condition!, goto_step: e.target.value }
+                          })}
+                          placeholder="step_id"
+                          className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground font-mono placeholder:text-muted-foreground/40 outline-none focus:border-amber-500/50"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Step Result (when executing) */}
           {stepResult && stepResult.output && (
             <div className="mt-2 p-3 bg-background/40 rounded-lg border border-border/20 max-h-48 overflow-y-auto custom-scrollbar">
@@ -331,7 +358,8 @@ function StepCard({
                 <span className="text-[10px] font-medium text-muted-foreground uppercase">Output</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
                   stepResult.status === 'success' ? 'bg-green-500/15 text-green-400' :
-                  stepResult.status === 'error' ? 'bg-red-500/15 text-red-400' : 'bg-muted text-muted-foreground'
+                  stepResult.status === 'error' ? 'bg-red-500/15 text-red-400' :
+                  stepResult.status === 'skipped' ? 'bg-gray-500/15 text-gray-400' : 'bg-muted text-muted-foreground'
                 }`}>{stepResult.status}</span>
               </div>
               <pre className="text-xs text-muted-foreground whitespace-pre-wrap font-mono leading-relaxed">
@@ -357,6 +385,7 @@ interface RunInput {
   title: string;
   inputPrompt: string;
   inputFiles: { filename: string; content_text: string }[];
+  variables: Record<string, string>;
 }
 
 function RunModal({ workflow, sessions, onRun, onClose }: {
@@ -372,6 +401,15 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
   const [inputFiles, setInputFiles] = useState<{ filename: string; content_text: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Initialize variable values from workflow definitions
+  const [varValues, setVarValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const v of (workflow.variables || [])) {
+      init[v.name] = v.default || '';
+    }
+    return init;
+  });
+
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     for (const file of files) {
@@ -386,15 +424,18 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
     setInputFiles(prev => prev.filter((_, i) => i !== idx));
   };
 
+  const wfVars = workflow.variables || [];
+
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
+      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar" onClick={e => e.stopPropagation()}>
         <h3 className="text-lg font-bold flex items-center gap-2">
           <Play className="w-5 h-5 text-green-400" />
           Run Workflow
         </h3>
         <p className="text-sm text-muted-foreground">
           <strong>{workflow.name}</strong> — {workflow.steps.length} step{workflow.steps.length !== 1 ? 's' : ''}
+          {wfVars.length > 0 && <span className="ml-2 text-indigo-400">· {wfVars.length} variable{wfVars.length !== 1 ? 's' : ''}</span>}
         </p>
 
         {/* Session Mode */}
@@ -488,6 +529,44 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
           </button>
         </div>
 
+        {/* Workflow Variables */}
+        {wfVars.length > 0 && (
+          <div className="space-y-2">
+            <label className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+              <Variable className="w-3 h-3" />
+              Variables
+            </label>
+            <div className="space-y-2">
+              {wfVars.map(v => (
+                <div key={v.name}>
+                  <label className="text-xs text-muted-foreground font-medium flex items-center gap-1 mb-1">
+                    <code className="text-[10px] px-1 py-0.5 rounded bg-indigo-500/10 text-indigo-400">${'{'}${v.name}{'}'}</code>
+                    {v.label || v.name}
+                    {v.required && <span className="text-red-400">*</span>}
+                  </label>
+                  {v.type === 'text' ? (
+                    <textarea
+                      value={varValues[v.name] || ''}
+                      onChange={e => setVarValues(prev => ({ ...prev, [v.name]: e.target.value }))}
+                      placeholder={v.default || `Enter ${v.label || v.name}...`}
+                      rows={3}
+                      className="w-full bg-background/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-indigo-500/50 resize-y font-mono"
+                    />
+                  ) : (
+                    <input
+                      type={v.type === 'number' ? 'number' : 'text'}
+                      value={varValues[v.name] || ''}
+                      onChange={e => setVarValues(prev => ({ ...prev, [v.name]: e.target.value }))}
+                      placeholder={v.default || `Enter ${v.label || v.name}...`}
+                      className="w-full bg-background/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-indigo-500/50"
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2 pt-2">
           <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-border/50 text-sm text-muted-foreground hover:text-foreground transition-colors">Cancel</button>
           <button
@@ -496,6 +575,7 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
               title,
               inputPrompt,
               inputFiles,
+              variables: varValues,
             })}
             disabled={mode === 'existing' && !selectedSession}
             className="flex-1 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
@@ -520,11 +600,18 @@ export function Workflows() {
   const [steps, setSteps] = useState<WorkflowStep[]>([]);
   const [wfName, setWfName] = useState('');
   const [wfDesc, setWfDesc] = useState('');
+  const [wfVariables, setWfVariables] = useState<WorkflowVariable[]>([]);
   const [unsaved, setUnsaved] = useState(false);
 
-  // Drag state
+  // Drag state (list view)
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  // DAG state
+  const [wfEdges, setWfEdges] = useState<WorkflowEdge[]>([]);
+  const [wfPositions, setWfPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'canvas' | 'list'>('canvas');
 
   // Execution state
   const [runModal, setRunModal] = useState<Workflow | null>(null);
@@ -598,6 +685,17 @@ export function Workflows() {
     // API uses snake_case 'input_files', UI uses camelCase 'inputFiles'
     inputFiles: Array.isArray(s.inputFiles) ? s.inputFiles
       : Array.isArray(s.input_files) ? s.input_files : [],
+    inputs: Array.isArray(s.inputs) && s.inputs.length > 0
+      ? s.inputs : [...DEFAULT_PORTS.inputs],
+    outputs: Array.isArray(s.outputs) && s.outputs.length > 0
+      ? s.outputs : [...DEFAULT_PORTS.outputs],
+    sub_workflow_id: s.sub_workflow_id || undefined,
+    condition: s.condition ? {
+      type: s.condition.type || 'always',
+      value: s.condition.value || '',
+      on_false: s.condition.on_false || 'skip',
+      goto_step: s.condition.goto_step || '',
+    } : { type: 'always', value: '', on_false: 'skip', goto_step: '' },
     config: {
       timeout: s.config?.timeout ?? s.timeout ?? 3600,
       continue_on_error: s.config?.continue_on_error ?? false,
@@ -607,15 +705,28 @@ export function Workflows() {
   const openEditor = (wf?: Workflow) => {
     if (wf) {
       setEditing(wf);
-      setSteps(wf.steps.map(normalizeStep));
+      const normalized = wf.steps.map(normalizeStep);
+      setSteps(normalized);
       setWfName(wf.name);
       setWfDesc(wf.description);
+      setWfVariables(wf.variables || []);
+      setWfEdges(wf.edges || []);
+      setWfPositions(wf.positions || {});
     } else {
-      setEditing({ id: '', name: 'New Workflow', description: '', steps: [], config: {}, created_at: 0, updated_at: 0 });
-      setSteps([defaultStep()]);
+      const firstStep = defaultStep();
+      setEditing({
+        id: '', name: 'New Workflow', description: '',
+        steps: [], edges: [], variables: [], positions: {},
+        config: {}, created_at: 0, updated_at: 0,
+      } as Workflow);
+      setSteps([firstStep]);
       setWfName('New Workflow');
       setWfDesc('');
+      setWfVariables([]);
+      setWfEdges([]);
+      setWfPositions({});
     }
+    setSelectedStepId(null);
     setUnsaved(false);
     setActiveRun(null);
     setShowRuns(false);
@@ -644,6 +755,35 @@ export function Workflows() {
     setSteps([...steps, defaultStep()]);
     setUnsaved(true);
   };
+
+  // Canvas: add a new step node with agent and optional position
+  const handleAddStepCanvas = useCallback((agent: string, position?: { x: number; y: number }) => {
+    const newStep = defaultStep();
+    newStep.agent = agent;
+    if (agent === 'sub_workflow') {
+      newStep.name = 'Sub-Workflow';
+    }
+    const pos = position || { x: steps.length * 300, y: 0 };
+    const newSteps = [...steps, newStep];
+    setSteps(newSteps);
+    setWfPositions(prev => ({ ...prev, [newStep.id]: pos }));
+
+    // Auto-connect to last step if exists
+    if (steps.length > 0) {
+      const lastStep = steps[steps.length - 1];
+      const newEdge: WorkflowEdge = {
+        id: `e-${lastStep.id}-${newStep.id}`,
+        source: lastStep.id,
+        sourceHandle: 'output',
+        target: newStep.id,
+        targetHandle: 'input',
+      };
+      setWfEdges(prev => [...prev, newEdge]);
+    }
+
+    setSelectedStepId(newStep.id);
+    setUnsaved(true);
+  }, [steps]);
 
   const moveStep = (from: number, to: number) => {
     if (to < 0 || to >= steps.length) return;
@@ -689,7 +829,7 @@ export function Workflows() {
         const res = await fetch(`${API}/api/workflows/${editing.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: wfName, description: wfDesc, steps }),
+          body: JSON.stringify({ name: wfName, description: wfDesc, steps, edges: wfEdges, positions: wfPositions, variables: wfVariables }),
         });
         const updated = await res.json();
         setEditing(updated);
@@ -698,7 +838,7 @@ export function Workflows() {
         const res = await fetch(`${API}/api/workflows`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: wfName, description: wfDesc, steps }),
+          body: JSON.stringify({ name: wfName, description: wfDesc, steps, edges: wfEdges, positions: wfPositions, variables: wfVariables }),
         });
         const created = await res.json();
         setEditing(created);
@@ -739,6 +879,7 @@ export function Workflows() {
           session_title: input.title,
           input_prompt: input.inputPrompt || undefined,
           input_files: input.inputFiles.length > 0 ? input.inputFiles : undefined,
+          variables: Object.keys(input.variables).length > 0 ? input.variables : undefined,
         }),
       });
       const data = await res.json();
@@ -767,8 +908,9 @@ export function Workflows() {
     return (
       <>
       {runModal && <RunModal workflow={runModal} sessions={sessions} onRun={startRun} onClose={() => setRunModal(null)} />}
-      <div className="p-6 h-full overflow-y-auto z-10 relative custom-scrollbar">
-        <div className="max-w-4xl mx-auto space-y-5">
+      <div className="flex flex-col h-full z-10 relative">
+        <div className="p-6 pb-2 shrink-0">
+          <div className="max-w-4xl mx-auto space-y-5">
           {/* Editor Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -803,6 +945,23 @@ export function Workflows() {
                   <History className="w-4 h-4" />
                 </button>
               )}
+              {/* View Mode Toggle */}
+              <div className="flex items-center bg-card border border-border/50 rounded-lg overflow-hidden">
+                <button
+                  onClick={() => setViewMode('canvas')}
+                  className={`p-2 transition-colors ${viewMode === 'canvas' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="DAG Canvas View"
+                >
+                  <Network className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setViewMode('list')}
+                  className={`p-2 transition-colors ${viewMode === 'list' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="List View"
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                </button>
+              </div>
               <button onClick={saveWorkflow}
                 className="flex items-center gap-2 bg-card border border-border/50 hover:bg-muted text-foreground px-4 py-2 rounded-lg text-sm font-medium transition-colors">
                 <Save className="w-4 h-4" /> Save
@@ -919,6 +1078,175 @@ export function Workflows() {
             </div>
           )}
 
+          {/* Variables Panel */}
+          <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold flex items-center gap-2">
+                <Variable className="w-4 h-4 text-purple-400" />
+                Variables
+                {wfVariables.length > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 font-medium">{wfVariables.length}</span>
+                )}
+              </h3>
+              <button
+                onClick={() => {
+                  setWfVariables([...wfVariables, { name: '', label: '', type: 'string', default: '', required: false }]);
+                  setUnsaved(true);
+                }}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-dashed border-border/50 text-xs text-muted-foreground hover:text-foreground hover:border-purple-500/30 transition-colors"
+              >
+                <Plus className="w-3 h-3" /> Add Variable
+              </button>
+            </div>
+            {wfVariables.length === 0 ? (
+              <p className="text-xs text-muted-foreground text-center py-3">
+                No variables defined. Add variables to use <code className="text-[10px] px-1 py-0.5 rounded bg-purple-500/10 text-purple-400">{'${VAR_NAME}'}</code> placeholders in step prompts.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {wfVariables.map((v, vi) => (
+                  <div key={vi} className="flex items-start gap-2 bg-background/40 border border-border/30 rounded-lg p-2.5">
+                    <div className="flex-1 grid grid-cols-4 gap-2">
+                      <div>
+                        <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">Name</label>
+                        <input
+                          value={v.name}
+                          onChange={e => {
+                            const updated = [...wfVariables];
+                            updated[vi] = { ...v, name: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') };
+                            setWfVariables(updated); setUnsaved(true);
+                          }}
+                          placeholder="TICKER"
+                          className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-purple-500/50 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">Label</label>
+                        <input
+                          value={v.label}
+                          onChange={e => {
+                            const updated = [...wfVariables];
+                            updated[vi] = { ...v, label: e.target.value };
+                            setWfVariables(updated); setUnsaved(true);
+                          }}
+                          placeholder="Stock Ticker"
+                          className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-purple-500/50"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">Default</label>
+                        <input
+                          value={v.default}
+                          onChange={e => {
+                            const updated = [...wfVariables];
+                            updated[vi] = { ...v, default: e.target.value };
+                            setWfVariables(updated); setUnsaved(true);
+                          }}
+                          placeholder="NVDA"
+                          className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-purple-500/50"
+                        />
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <div className="flex-1">
+                          <label className="text-[10px] text-muted-foreground font-medium block mb-0.5">Type</label>
+                          <select
+                            value={v.type}
+                            onChange={e => {
+                              const updated = [...wfVariables];
+                              updated[vi] = { ...v, type: e.target.value as any };
+                              setWfVariables(updated); setUnsaved(true);
+                            }}
+                            className="w-full bg-background/60 border border-border/40 rounded px-2 py-1 text-xs text-foreground outline-none"
+                          >
+                            <option value="string">String</option>
+                            <option value="number">Number</option>
+                            <option value="text">Text (multi)</option>
+                          </select>
+                        </div>
+                        <label className="flex items-center gap-1 text-[10px] text-muted-foreground pb-0.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={v.required}
+                            onChange={e => {
+                              const updated = [...wfVariables];
+                              updated[vi] = { ...v, required: e.target.checked };
+                              setWfVariables(updated); setUnsaved(true);
+                            }}
+                            className="w-3 h-3 rounded"
+                          />
+                          Req
+                        </label>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setWfVariables(wfVariables.filter((_, i) => i !== vi));
+                        setUnsaved(true);
+                      }}
+                      className="p-1 rounded text-muted-foreground hover:text-red-400 transition-colors mt-4"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Canvas View ── */}
+      {viewMode === 'canvas' && (
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          <div className="flex-1 relative" style={{ minHeight: '500px' }}>
+            <WorkflowCanvas
+              steps={steps}
+              edges={wfEdges}
+              positions={wfPositions}
+              agents={agents}
+              workflows={workflows}
+              activeRun={activeRun}
+              selectedStepId={selectedStepId}
+              onStepsChange={s => { setSteps(s); setUnsaved(true); }}
+              onEdgesChange={e => { setWfEdges(e); setUnsaved(true); }}
+              onPositionsChange={p => { setWfPositions(p); }}
+              onSelectStep={setSelectedStepId}
+              onAddStep={handleAddStepCanvas}
+            />
+          </div>
+          {selectedStepId && steps.find(s => s.id === selectedStepId) && (
+            <StepDetailPanel
+              step={steps.find(s => s.id === selectedStepId)!}
+              agents={agents}
+              workflows={workflows}
+              currentWorkflowId={editing?.id}
+              edges={wfEdges}
+              steps={steps}
+              stepResult={activeRun?.results?.find((r: any) => r.step_id === selectedStepId)}
+              allResults={activeRun?.results || []}
+              onUpdate={(updated) => {
+                setSteps(steps.map(s => s.id === updated.id ? updated : s));
+                setUnsaved(true);
+              }}
+              onDelete={() => {
+                setSteps(steps.filter(s => s.id !== selectedStepId));
+                setWfEdges(wfEdges.filter(e => e.source !== selectedStepId && e.target !== selectedStepId));
+                const newPos = { ...wfPositions };
+                delete newPos[selectedStepId];
+                setWfPositions(newPos);
+                setSelectedStepId(null);
+                setUnsaved(true);
+              }}
+              onClose={() => setSelectedStepId(null)}
+            />
+          )}
+        </div>
+      )}
+
+      {/* ── List View (original) ── */}
+      {viewMode === 'list' && (
+        <div className="p-6 flex-1 overflow-y-auto custom-scrollbar">
+          <div className="max-w-4xl mx-auto space-y-3">
           {/* Steps Pipeline */}
           <div className="space-y-3">
             {steps.map((step, i) => (
@@ -963,7 +1291,9 @@ export function Workflows() {
           >
             <Plus className="w-4 h-4" /> Add Step
           </button>
+          </div>
         </div>
+      )}
       </div>
       </>
     );
