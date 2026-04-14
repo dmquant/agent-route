@@ -60,6 +60,8 @@ def init_workflow_tables():
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS workflows (
             id              TEXT PRIMARY KEY,
+            project_id      TEXT,
+            client_id       TEXT,
             name            TEXT NOT NULL,
             description     TEXT DEFAULT '',
             steps_json      TEXT NOT NULL DEFAULT '[]',
@@ -110,6 +112,18 @@ def init_workflow_tables():
         print("[WorkflowStore] Migrated: added executing_steps_json column.")
     except Exception:
         pass
+    try:
+        conn2.execute("SELECT project_id FROM workflows LIMIT 1")
+    except sqlite3.OperationalError:
+        conn2.execute("ALTER TABLE workflows ADD COLUMN project_id TEXT")
+        conn2.execute("CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows(project_id)")
+        conn2.commit()
+    try:
+        conn2.execute("SELECT client_id FROM workflows LIMIT 1")
+    except sqlite3.OperationalError:
+        conn2.execute("ALTER TABLE workflows ADD COLUMN client_id TEXT")
+        conn2.execute("CREATE INDEX IF NOT EXISTS idx_workflows_client ON workflows(client_id)")
+        conn2.commit()
     conn2.close()
 
     conn.close()
@@ -121,6 +135,8 @@ def init_workflow_tables():
 def _row_to_workflow(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
+        "project_id": row["project_id"],
+        "client_id": row["client_id"],
         "name": row["name"],
         "description": row["description"],
         "steps": json.loads(row["steps_json"]),
@@ -136,6 +152,8 @@ def _row_to_workflow(row: sqlite3.Row) -> Dict[str, Any]:
 def create_workflow(
     name: str,
     description: str = "",
+    project_id: Optional[str] = None,
+    client_id: Optional[str] = None,
     steps: Optional[List[Dict]] = None,
     config: Optional[Dict] = None,
     variables: Optional[List[Dict]] = None,
@@ -146,9 +164,9 @@ def create_workflow(
     now = int(time.time() * 1000)
     conn = _get_conn()
     conn.execute(
-        """INSERT INTO workflows (id, name, description, steps_json, config_json, variables_json, edges_json, positions_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (wf_id, name, description, json.dumps(steps or []), json.dumps(config or {}),
+        """INSERT INTO workflows (id, project_id, client_id, name, description, steps_json, config_json, variables_json, edges_json, positions_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (wf_id, project_id, client_id, name, description, json.dumps(steps or []), json.dumps(config or {}),
          json.dumps(variables or []), json.dumps(edges or []), json.dumps(positions or {}), now, now),
     )
     conn.commit()
@@ -157,9 +175,24 @@ def create_workflow(
     return _row_to_workflow(row)
 
 
-def list_workflows() -> List[Dict[str, Any]]:
+def list_workflows(project_id: Optional[str] = None, client_id: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = _get_conn()
-    rows = conn.execute("SELECT * FROM workflows ORDER BY updated_at DESC").fetchall()
+    query = "SELECT * FROM workflows"
+    conditions = []
+    params = []
+    
+    if project_id:
+        conditions.append("project_id=?")
+        params.append(project_id)
+    if client_id:
+        conditions.append("client_id=?")
+        params.append(client_id)
+        
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY updated_at DESC"
+    
+    rows = conn.execute(query, tuple(params)).fetchall()
     result = []
     for r in rows:
         wf = _row_to_workflow(r)
@@ -189,6 +222,7 @@ def update_workflow(
     variables: Optional[List[Dict]] = None,
     edges: Optional[List[Dict]] = None,
     positions: Optional[Dict] = None,
+    client_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     conn = _get_conn()
     existing = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
@@ -197,19 +231,25 @@ def update_workflow(
         return None
 
     now = int(time.time() * 1000)
-    new_name = name if name is not None else existing["name"]
-    new_desc = description if description is not None else existing["description"]
-    new_steps = json.dumps(steps) if steps is not None else existing["steps_json"]
-    new_config = json.dumps(config) if config is not None else existing["config_json"]
-    new_vars = json.dumps(variables) if variables is not None else (existing["variables_json"] or "[]")
-    new_edges = json.dumps(edges) if edges is not None else (existing["edges_json"] or "[]")
-    new_pos = json.dumps(positions) if positions is not None else (existing["positions_json"] or "{}")
+    existing_dict = dict(existing)
+    
+    new_name = name if name is not None else existing_dict["name"]
+    new_desc = description if description is not None else existing_dict["description"]
+    new_steps = json.dumps(steps) if steps is not None else existing_dict["steps_json"]
+    new_config = json.dumps(config) if config is not None else existing_dict["config_json"]
+    new_vars = json.dumps(variables) if variables is not None else (existing_dict["variables_json"] or "[]")
+    new_edges = json.dumps(edges) if edges is not None else (existing_dict["edges_json"] or "[]")
+    new_pos = json.dumps(positions) if positions is not None else (existing_dict["positions_json"] or "{}")
+    
+    new_cid = client_id if client_id is not None else existing_dict.get("client_id")
+    if new_cid == "__UNSET__":
+        new_cid = None
 
     conn.execute(
         """UPDATE workflows SET name=?, description=?, steps_json=?, config_json=?, variables_json=?,
-           edges_json=?, positions_json=?, updated_at=?
+           edges_json=?, positions_json=?, client_id=?, updated_at=?
            WHERE id=?""",
-        (new_name, new_desc, new_steps, new_config, new_vars, new_edges, new_pos, now, workflow_id),
+        (new_name, new_desc, new_steps, new_config, new_vars, new_edges, new_pos, new_cid, now, workflow_id),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
@@ -282,7 +322,7 @@ def update_run(
     new_exec_steps = json.dumps(executing_steps) if executing_steps is not None else (existing["executing_steps_json"] if "executing_steps_json" in existing.keys() else "[]")
     new_results = json.dumps(results) if results is not None else existing["results_json"]
     new_error = error if error is not None else existing["error"]
-    finished = int(time.time() * 1000) if new_status in ("completed", "failed", "cancelled") else existing["finished_at"]
+    finished = int(time.time() * 1000) if new_status in ("completed", "failed", "cancelled", "rate_limited") else existing["finished_at"]
 
     conn.execute(
         """UPDATE workflow_runs

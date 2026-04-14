@@ -390,7 +390,7 @@ class WorkflowExecutor:
                     }
 
                     # Track failures
-                    if step_result.get("status") in ("error", "timeout"):
+                    if step_result.get("status") in ("error", "timeout", "rate_limited"):
                         step_config = step.get("config", {})
                         if not step_config.get("continue_on_error", False):
                             level_failed = True
@@ -403,13 +403,15 @@ class WorkflowExecutor:
 
                 # Stop if any step in this level failed (and wasn't set to continue)
                 if level_failed:
+                    is_rate_limited = any(r.get("status") == "rate_limited" for r in results)
                     first_error = next(
                         (r.get("error", "Unknown error") for r in results
-                         if r.get("status") in ("error", "timeout")),
+                         if r.get("status") in ("error", "timeout", "rate_limited")),
                         "Step failed"
                     )
-                    update_run(run_id, status="failed", results=results, error=first_error)
-                    return {"status": "failed", "results": results, "error": first_error}
+                    final_status = "rate_limited" if is_rate_limited else "failed"
+                    update_run(run_id, status=final_status, results=results, error=first_error)
+                    return {"status": final_status, "results": results, "error": first_error}
 
             # All levels completed
             completion_msg = (
@@ -733,12 +735,13 @@ class WorkflowExecutor:
                 if step_result["status"] == "success":
                     prev_output = step_result.get("output", "")
                     prev_exit_code = step_result.get("exit_code", 0) or 0
-                elif step_result["status"] in ("error", "timeout"):
+                elif step_result["status"] in ("error", "timeout", "rate_limited"):
                     prev_exit_code = step_result.get("exit_code", 1) or 1
                     if not step_config.get("continue_on_error", False):
-                        update_run(run_id, status="failed", results=results,
+                        final_status = "rate_limited" if step_result["status"] == "rate_limited" else "failed"
+                        update_run(run_id, status=final_status, results=results,
                                    error=step_result.get("error", f"Step {i + 1} failed"))
-                        return {"status": "failed", "results": results}
+                        return {"status": final_status, "results": results}
 
                 i += 1
 
@@ -798,8 +801,8 @@ class WorkflowExecutor:
             agent_type=agent,
         )
 
-        # Get the hand
-        hand = hand_registry.get(agent)
+        # Get an available hand (fallback to others if rate limited)
+        hand = hand_registry.get_available(agent, backups=["gemini", "claude", "codex"])
         if not hand:
             error_msg = f"Agent '{agent}' not available"
             if on_log:
@@ -881,6 +884,38 @@ class WorkflowExecutor:
             step_end = int(time.time() * 1000)
             agent_output = "".join(full_output_chunks)
 
+            # ─── Check for Rate Limit ─────
+            from app.hands.base import check_rate_limit
+            wait_time = check_rate_limit(agent_output)
+            is_rate_limited = False
+            
+            if wait_time is not None:
+                is_rate_limited = True
+                hand_registry.mark_rate_limited(hand.name, wait_time)
+                result.exit_code = 429
+                result.output = f"[RATE LIMITED] {hand.name} is paused for {wait_time}s. Original Output:\n{agent_output}"
+                
+                # Fetch workflow_id to schedule retry
+                from app.workflow_store import get_run
+                run_data = get_run(run_id)
+                workflow_id = run_data.get("workflow_id") if run_data else None
+                
+                if workflow_id:
+                    try:
+                        from app.scheduler import scheduler, run_scheduled_workflow
+                        from datetime import datetime, timedelta
+                        run_at = datetime.now() + timedelta(seconds=wait_time + 5)
+                        scheduler.add_job(
+                            run_scheduled_workflow,
+                            'date',
+                            run_date=run_at,
+                            kwargs={"workflow_id": workflow_id},
+                            id=f"retry_{workflow_id}_{int(time.time())}"
+                        )
+                        result.output += f"\n\n[System] Scheduled automatic re-run for workflow {workflow_id} at {run_at.isoformat()}"
+                    except Exception as e:
+                        result.output += f"\n\n[System] Failed to schedule re-run: {e}"
+
             # ─── Log agent response message ─────
             add_message(
                 session_id, source='agent', content=agent_output, agent_type=agent,
@@ -922,12 +957,12 @@ class WorkflowExecutor:
                     "type": "node_execution_image", "b64": result.image_b64,
                 })
 
-            await task_manager.update_phase(task_id, TaskPhase.COMPLETED, exit_code=result.exit_code)
+            await task_manager.update_phase(task_id, TaskPhase.COMPLETED if result.success else TaskPhase.FAILED, exit_code=result.exit_code)
 
             step_result = {
                 "step_id": step_id, "step_index": step_index,
                 "agent": agent,
-                "status": "success" if result.success else "error",
+                "status": "success" if result.success else ("rate_limited" if is_rate_limited else "error"),
                 "output": result.output,
                 "exit_code": result.exit_code,
                 "latency_ms": step_end - step_start,

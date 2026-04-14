@@ -35,6 +35,37 @@ class HandRegistry:
         """Serializable list of hand metadata."""
         return [h.info() for h in self._hands.values()]
 
+    def mark_rate_limited(self, name: str, retry_after: int) -> None:
+        """Mark an agent as rate limited until the given time."""
+        import time
+        if not hasattr(self, "_rate_limits"):
+            self._rate_limits = {}
+        self._rate_limits[name] = time.time() + retry_after
+        print(f"[HandRegistry] {name} rate limited for {retry_after}s.")
+
+    def is_available(self, name: str) -> bool:
+        """Check if agent is available (not rate limited)."""
+        import time
+        if not hasattr(self, "_rate_limits"):
+            self._rate_limits = {}
+        until = self._rate_limits.get(name)
+        if until:
+            if time.time() < until:
+                return False
+            del self._rate_limits[name]
+        return True
+
+    def get_available(self, name: str, backups: List[str] = None) -> Optional[Hand]:
+        """Get the primary agent if available, else try backups in order."""
+        if self.is_available(name):
+            return self.get(name)
+        if backups:
+            for b in backups:
+                if self.is_available(b):
+                    print(f"[HandRegistry] {name} rate limited, falling back to {b}")
+                    return self.get(b)
+        return None
+
     async def health_check_all(self) -> Dict[str, dict]:
         """Check health of all registered hands concurrently.
         

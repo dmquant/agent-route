@@ -435,7 +435,10 @@ function ErrorFeed({ errors }: { errors: AnalyticsData['recent_errors'] }) {
 // ═══════════════════════════════════════════════════
 // ─── Main Dashboard Component ─────────────────────
 // ═══════════════════════════════════════════════════
+import { useLanguage } from '../i18n';
+
 export function Dashboard() {
+  const { t } = useLanguage();
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [benchmark, setBenchmark] = useState<BenchmarkData | null>(null);
   const [timeRange, setTimeRange] = useState(7);
@@ -475,10 +478,10 @@ export function Dashboard() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
               <Gauge className="w-8 h-8 text-indigo-400" />
-              Task Report Dashboard
+              {t('dashboard.title')}
             </h1>
             <p className="text-muted-foreground mt-1">
-              Aggregate performance analytics, agent benchmarking, and error monitoring
+              {t('dashboard.subtitle')}
             </p>
           </div>
 
@@ -495,7 +498,7 @@ export function Dashboard() {
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
                   }`}
                 >
-                  {d === 1 ? 'Today' : `${d}d`}
+                  {d === 1 ? t('dashboard.today') : `${d}d`}
                 </button>
               ))}
             </div>
@@ -530,14 +533,14 @@ export function Dashboard() {
             {/* KPI Cards */}
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
               <MetricCard
-                label="Total Tasks"
+                label={t('dashboard.totalTasks')}
                 value={m.total_tasks.toLocaleString()}
                 subValue={`${m.unique_sessions} sessions`}
                 icon={Layers}
                 color="text-indigo-500"
               />
               <MetricCard
-                label="Success Rate"
+                label={t('dashboard.successRate')}
                 value={`${m.success_rate}%`}
                 subValue={`${m.success_count}✓ / ${m.error_count}✗`}
                 icon={Target}
@@ -545,28 +548,28 @@ export function Dashboard() {
                 trend={m.success_rate >= 90 ? 'up' : m.success_rate < 70 ? 'down' : 'neutral'}
               />
               <MetricCard
-                label="Avg Latency"
+                label={t('dashboard.avgLatency')}
                 value={formatLatency(m.avg_latency_ms)}
                 subValue={`P95: ${formatLatency(m.p95_latency_ms)}`}
                 icon={Timer}
                 color="text-cyan-500"
               />
               <MetricCard
-                label="Throughput"
+                label={t('dashboard.throughput')}
                 value={formatBytes(m.total_output_bytes)}
                 subValue={`${m.total_output_chunks.toLocaleString()} chunks`}
                 icon={Zap}
                 color="text-amber-500"
               />
               <MetricCard
-                label="Active Agents"
+                label={t('dashboard.activeAgents')}
                 value={m.unique_agents}
                 subValue={Object.keys(analytics.agent_breakdown).join(', ')}
                 icon={Users}
                 color="text-purple-500"
               />
               <MetricCard
-                label="Error Count"
+                label={t('dashboard.errorCount')}
                 value={m.error_count}
                 subValue={analytics.recent_errors.length > 0 ? `Latest: ${analytics.recent_errors[0]?.agent}` : 'No errors'}
                 icon={m.error_count > 0 ? Flame : CheckCircle2}
@@ -580,21 +583,33 @@ export function Dashboard() {
               {/* Activity Charts (2/3) */}
               <div className="lg:col-span-2 space-y-6">
                 {/* Hourly Heatmap */}
-                <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
-                  <HourlyHeatmap data={analytics.hourly_heatmap} />
+                <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm relative">
+                  <div className="absolute top-4 left-6 flex items-center gap-2 z-10">
+                    <Clock className="w-4 h-4 text-indigo-400" />
+                    <h3 className="text-sm font-semibold">{t('dashboard.hourlyActivity')}</h3>
+                  </div>
+                  <div className="pt-8 block">
+                    <HourlyHeatmap data={analytics.hourly_heatmap} />
+                  </div>
                 </div>
 
                 {/* Daily Trend + Agent Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
-                    <DailySparkline data={analytics.daily_breakdown} />
+                  <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm relative">
+                    <div className="absolute top-4 left-6 flex items-center gap-2 z-10">
+                      <Calendar className="w-4 h-4 text-indigo-400" />
+                      <h3 className="text-sm font-semibold">{t('dashboard.dailyTrend')}</h3>
+                    </div>
+                    <div className="pt-8 block">
+                      <DailySparkline data={analytics.daily_breakdown} />
+                    </div>
                   </div>
 
                   {/* Quick Stats */}
                   <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
                     <div className="flex items-center gap-2 mb-4">
                       <BarChart3 className="w-4 h-4 text-indigo-400" />
-                      <h3 className="text-sm font-semibold">Performance Percentiles</h3>
+                      <h3 className="text-sm font-semibold">Percentiles</h3>
                     </div>
                     <div className="space-y-3">
                       {[
@@ -623,7 +638,7 @@ export function Dashboard() {
                 <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
                   <div className="flex items-center gap-2 mb-4">
                     <Cpu className="w-4 h-4 text-indigo-400" />
-                    <h3 className="text-sm font-semibold">Agent Performance</h3>
+                    <h3 className="text-sm font-semibold">{t('dashboard.agentPerf')}</h3>
                     <span className="text-[10px] text-muted-foreground ml-auto">
                       {Object.keys(analytics.agent_breakdown).length} agents
                     </span>
@@ -638,7 +653,7 @@ export function Dashboard() {
                 <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
                   <div className="flex items-center gap-2 mb-4">
                     <Trophy className="w-4 h-4 text-amber-400" />
-                    <h3 className="text-sm font-semibold">Agent Benchmark</h3>
+                    <h3 className="text-sm font-semibold">{t('dashboard.agentBenchmark')}</h3>
                     <span className="text-[10px] text-muted-foreground ml-auto">{timeRange}d window</span>
                   </div>
                   <BenchmarkLeaderboard benchmark={benchmark} />
@@ -648,7 +663,7 @@ export function Dashboard() {
                 <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
                   <div className="flex items-center gap-2 mb-4">
                     <AlertTriangle className="w-4 h-4 text-red-400" />
-                    <h3 className="text-sm font-semibold">Recent Errors</h3>
+                    <h3 className="text-sm font-semibold">{t('dashboard.recentErrors')}</h3>
                     {analytics.recent_errors.length > 0 && (
                       <span className="text-[10px] px-1.5 py-0.5 bg-red-500/10 text-red-400 rounded-full font-medium ml-auto">
                         {analytics.recent_errors.length}
@@ -663,7 +678,7 @@ export function Dashboard() {
                   <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-sm">
                     <div className="flex items-center gap-2 mb-4">
                       <Activity className="w-4 h-4 text-indigo-400" />
-                      <h3 className="text-sm font-semibold">Top Sessions</h3>
+                      <h3 className="text-sm font-semibold">{t('dashboard.topSessions')}</h3>
                     </div>
                     <div className="space-y-2">
                       {analytics.top_sessions.slice(0, 8).map((s, i) => (
@@ -694,9 +709,9 @@ export function Dashboard() {
         {!isLoading && analytics && m && m.total_tasks === 0 && (
           <div className="flex flex-col items-center justify-center h-64 text-center">
             <BarChart3 className="w-12 h-12 text-muted-foreground/30 mb-4" />
-            <h3 className="text-lg font-semibold text-muted-foreground">No Task Data Yet</h3>
+            <h3 className="text-lg font-semibold text-muted-foreground">{t('dashboard.noData')}</h3>
             <p className="text-sm text-muted-foreground/70 mt-1 max-w-md">
-              Run some tasks through the Workspace chat to see performance analytics, agent benchmarks, and error monitoring here.
+              {t('dashboard.noDataDesc')}
             </p>
           </div>
         )}

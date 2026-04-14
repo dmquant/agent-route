@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   Plus, MessageSquare, Trash2, ChevronDown, ChevronRight,
-  Hash, X, FolderPlus, Sparkles, Loader2
+  Hash, X, FolderPlus, Sparkles, Loader2, Key
 } from 'lucide-react';
 import type { SessionState } from '../hooks/useSessionState';
 
@@ -322,12 +322,27 @@ export function SessionPanel({ state, isOpen, onToggle, runningSessions = new Se
             </button>
           )}
           {contextMenu.type === 'project' && (
-            <button
-              onClick={() => { state.deleteProject(contextMenu.id); setContextMenu(null); }}
-              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> Delete Project
-            </button>
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  const proj = state.projects.find(p => p.id === contextMenu.id);
+                  if (proj) navigator.clipboard.writeText(proj.api_key);
+                  setContextMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
+                title="Copy API Key to clipboard"
+              >
+                <Key className="w-3.5 h-3.5" /> Copy API Key
+              </button>
+              <button
+                onClick={() => { state.deleteProject(contextMenu.id); setContextMenu(null); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Delete Project
+              </button>
+            </>
           )}
         </div>
       )}

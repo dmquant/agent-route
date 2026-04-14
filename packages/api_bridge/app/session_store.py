@@ -27,18 +27,29 @@ def init_session_db():
     conn = _get_conn()
     c = conn.cursor()
     c.executescript('''
+        CREATE TABLE IF NOT EXISTS clients (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            api_key TEXT UNIQUE NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
+            client_id TEXT,
             name TEXT NOT NULL,
             description TEXT DEFAULT '',
             color TEXT DEFAULT '#6366f1',
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             project_id TEXT,
+            client_id TEXT,
             title TEXT DEFAULT 'New Session',
             agent_type TEXT DEFAULT 'gemini',
             workspace_dir TEXT,
@@ -88,6 +99,14 @@ def init_session_db():
         conn.commit()
         print("[Migration] Added workspace_dir column to sessions table.")
 
+    try:
+        c.execute("SELECT client_id FROM projects LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE projects ADD COLUMN client_id TEXT")
+        c.execute("ALTER TABLE sessions ADD COLUMN client_id TEXT")
+        conn.commit()
+        print("[Migration] Added client_id column to projects and sessions")
+
     conn.close()
 
 
@@ -108,49 +127,90 @@ def _provision_session_workspace(session_id: str) -> str:
     return workspace
 
 
+# ─── Clients ──────────────────────────────────────────────────
+
+def create_client(name: str) -> Dict:
+    conn = _get_conn()
+    cid = uuid4().hex
+    api_key = f"sk_{uuid4().hex}"
+    now = int(time.time() * 1000)
+    conn.execute(
+        'INSERT INTO clients (id, name, api_key, created_at, updated_at) VALUES (?,?,?,?,?)',
+        (cid, name, api_key, now, now)
+    )
+    conn.commit()
+    row = conn.execute('SELECT * FROM clients WHERE id=?', (cid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+def get_client_by_api_key(api_key: str) -> Optional[Dict]:
+    conn = _get_conn()
+    row = conn.execute('SELECT * FROM clients WHERE api_key=?', (api_key,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def list_clients() -> List[Dict]:
+    conn = _get_conn()
+    rows = conn.execute('SELECT * FROM clients ORDER BY updated_at DESC').fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def delete_client(client_id: str) -> bool:
+    conn = _get_conn()
+    conn.execute('DELETE FROM clients WHERE id=?', (client_id,))
+    conn.commit()
+    conn.close()
+    return True
+
 # ─── Projects ───────────────────────────────────────────────
 
-def create_project(name: str, description: str = '', color: str = '#6366f1') -> Dict:
+def create_project(name: str, description: str = '', color: str = '#6366f1', client_id: Optional[str] = None) -> Dict:
     conn = _get_conn()
     pid = uuid4().hex
     now = int(time.time() * 1000)
     conn.execute(
-        'INSERT INTO projects (id, name, description, color, created_at, updated_at) VALUES (?,?,?,?,?,?)',
-        (pid, name, description, color, now, now)
+        'INSERT INTO projects (id, client_id, name, description, color, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
+        (pid, client_id, name, description, color, now, now)
     )
     conn.commit()
     row = conn.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone()
     conn.close()
     return dict(row)
 
-
-def list_projects() -> List[Dict]:
+def list_projects(client_id: Optional[str] = None) -> List[Dict]:
     conn = _get_conn()
-    rows = conn.execute('SELECT * FROM projects ORDER BY updated_at DESC').fetchall()
+    if client_id:
+        rows = conn.execute('SELECT * FROM projects WHERE client_id=? ORDER BY updated_at DESC', (client_id,)).fetchall()
+    else:
+        rows = conn.execute('SELECT * FROM projects ORDER BY updated_at DESC').fetchall()
     result = []
     for r in rows:
         d = dict(r)
-        # Attach session count
         cnt = conn.execute('SELECT COUNT(*) as c FROM sessions WHERE project_id=?', (r['id'],)).fetchone()
         d['session_count'] = cnt['c'] if cnt else 0
         result.append(d)
     conn.close()
     return result
 
-
-def update_project(project_id: str, name: Optional[str] = None, description: Optional[str] = None, color: Optional[str] = None) -> Optional[Dict]:
+def update_project(project_id: str, name: Optional[str] = None, description: Optional[str] = None, color: Optional[str] = None, client_id: Optional[str] = None) -> Optional[Dict]:
     conn = _get_conn()
     existing = conn.execute('SELECT * FROM projects WHERE id=?', (project_id,)).fetchone()
     if not existing:
         conn.close()
         return None
     now = int(time.time() * 1000)
+    
+    # Safely get client_id handling if existing column might not have it loaded due to PRAGMA cache
+    existing_dict = dict(existing)
+    existing_cid = existing_dict.get('client_id')
+    
     conn.execute(
-        'UPDATE projects SET name=?, description=?, color=?, updated_at=? WHERE id=?',
+        'UPDATE projects SET name=?, description=?, color=?, client_id=?, updated_at=? WHERE id=?',
         (
-            name if name is not None else existing['name'],
-            description if description is not None else existing['description'],
-            color if color is not None else existing['color'],
+            name if name is not None else existing_dict['name'],
+            description if description is not None else existing_dict['description'],
+            color if color is not None else existing_dict['color'],
+            client_id if client_id is not None else existing_cid,
             now,
             project_id
         )
@@ -171,31 +231,38 @@ def delete_project(project_id: str) -> bool:
 
 # ─── Sessions ───────────────────────────────────────────────
 
-def create_session(project_id: Optional[str] = None, title: str = 'New Session', agent_type: str = 'gemini') -> Dict:
+def create_session(project_id: Optional[str] = None, client_id: Optional[str] = None, title: str = 'New Session', agent_type: str = 'gemini') -> Dict:
     conn = _get_conn()
     sid = uuid4().hex
     now = int(time.time() * 1000)
     # Provision an isolated workspace directory for this session
     workspace = _provision_session_workspace(sid)
     conn.execute(
-        'INSERT INTO sessions (id, project_id, title, agent_type, workspace_dir, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
-        (sid, project_id, title, agent_type, workspace, now, now)
+        'INSERT INTO sessions (id, project_id, client_id, title, agent_type, workspace_dir, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)',
+        (sid, project_id, client_id, title, agent_type, workspace, now, now)
     )
     conn.commit()
     row = conn.execute('SELECT * FROM sessions WHERE id=?', (sid,)).fetchone()
     conn.close()
     return dict(row)
 
-
-def list_sessions(project_id: Optional[str] = None) -> List[Dict]:
+def list_sessions(project_id: Optional[str] = None, client_id: Optional[str] = None) -> List[Dict]:
     conn = _get_conn()
+    query = 'SELECT * FROM sessions'
+    conditions = []
+    params = []
     if project_id:
-        rows = conn.execute(
-            'SELECT * FROM sessions WHERE project_id=? ORDER BY updated_at DESC',
-            (project_id,)
-        ).fetchall()
-    else:
-        rows = conn.execute('SELECT * FROM sessions ORDER BY updated_at DESC').fetchall()
+        conditions.append('project_id=?')
+        params.append(project_id)
+    if client_id:
+        conditions.append('client_id=?')
+        params.append(client_id)
+        
+    if conditions:
+        query += ' WHERE ' + ' AND '.join(conditions)
+    query += ' ORDER BY updated_at DESC'
+    
+    rows = conn.execute(query, tuple(params)).fetchall()
     
     result = []
     for r in rows:
@@ -220,18 +287,22 @@ def get_session(session_id: str) -> Optional[Dict]:
     return dict(row) if row else None
 
 
-def update_session(session_id: str, title: Optional[str] = None, project_id: Optional[str] = '__UNSET__') -> Optional[Dict]:
+def update_session(session_id: str, title: Optional[str] = None, project_id: Optional[str] = '__UNSET__', client_id: Optional[str] = '__UNSET__') -> Optional[Dict]:
     conn = _get_conn()
     existing = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
     if not existing:
         conn.close()
         return None
     now = int(time.time() * 1000)
-    new_title = title if title is not None else existing['title']
-    new_project = existing['project_id'] if project_id == '__UNSET__' else project_id
+    existing_dict = dict(existing)
+    
+    new_title = title if title is not None else existing_dict['title']
+    new_project = existing_dict['project_id'] if project_id == '__UNSET__' else project_id
+    new_client = existing_dict.get('client_id') if client_id == '__UNSET__' else client_id
+    
     conn.execute(
-        'UPDATE sessions SET title=?, project_id=?, updated_at=? WHERE id=?',
-        (new_title, new_project, now, session_id)
+        'UPDATE sessions SET title=?, project_id=?, client_id=?, updated_at=? WHERE id=?',
+        (new_title, new_project, new_client, now, session_id)
     )
     conn.commit()
     row = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()

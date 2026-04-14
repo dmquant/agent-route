@@ -5,7 +5,7 @@ import {
   FileText, X, Loader2, CheckCircle2, XCircle,
   Clock, AlertTriangle, Zap, Variable,
   ArrowDown, BookOpen, History, GitBranch, SkipForward,
-  LayoutGrid, Network,
+  LayoutGrid, Network, Building
 } from 'lucide-react';
 import WorkflowCanvas from '../components/workflow/WorkflowCanvas';
 import StepDetailPanel from '../components/workflow/StepDetailPanel';
@@ -15,6 +15,7 @@ import {
   type AgentInfo, type SessionInfo,
   AGENT_COLORS, defaultStep, DEFAULT_PORTS,
 } from '../components/workflow/types';
+import { clientsApi, type Client } from '../api/sessions';
 
 const API = 'http://localhost:8000';
 
@@ -588,18 +589,242 @@ function RunModal({ workflow, sessions, onRun, onClose }: {
   );
 }
 
+// ─── Schedule Modals ──────────────────────
+function ScheduleModal({ workflow, onSchedule, onClose }: {
+  workflow: Workflow;
+  onSchedule: (cron: string, prompt: string) => void;
+  onClose: () => void;
+}) {
+  const [cron, setCron] = useState('0 0 * * *');
+  const [prompt, setPrompt] = useState('');
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold flex items-center gap-2">
+          <Clock className="w-5 h-5 text-indigo-400" />
+          Schedule Workflow
+        </h3>
+        <p className="text-sm text-muted-foreground">Automate <strong>{workflow.name}</strong></p>
+        
+        <div>
+          <label className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider block mb-1">Cron Expression</label>
+          <input
+            type="text"
+            value={cron}
+            onChange={e => setCron(e.target.value)}
+            placeholder="0 * * * *"
+            className="w-full bg-background/60 border border-border/40 rounded-lg px-3 py-2 text-sm font-mono text-foreground outline-none"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1.5 flex flex-col gap-0.5">
+            <span><code>*/5 * * * *</code> = Every 5 mins</span>
+            <span><code>0 * * * *</code> = Hourly</span>
+            <span><code>0 0 * * *</code> = Daily at midnight</span>
+          </p>
+        </div>
+
+        <div>
+          <label className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider block mb-1">Initial Prompt (Optional)</label>
+          <textarea
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            placeholder="Starting prompt injected into the workflow execution..."
+            rows={2}
+            className="w-full bg-background/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground outline-none"
+          />
+        </div>
+
+        <div className="pt-2 flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 text-sm font-medium hover:bg-muted text-muted-foreground hover:text-foreground rounded-lg transition-colors border border-border/50">Cancel</button>
+          <button onClick={() => onSchedule(cron, prompt)} className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2">
+            <CheckCircle2 className="w-4 h-4" /> Schedule Task
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScheduledJobsModal({ onClose, workflows, fetchSessions }: { onClose: () => void, workflows: Workflow[], fetchSessions: () => void }) {
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Create Job State
+  const [isCreating, setIsCreating] = useState(false);
+  const [createWfId, setCreateWfId] = useState('');
+  const [createCron, setCreateCron] = useState('0 0 * * *');
+  const [createPrompt, setCreatePrompt] = useState('');
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/scheduled-jobs`);
+      const data = await res.json();
+      setJobs(data.jobs || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, []);
+
+  const deleteJob = async (jobId: string) => {
+    if (!confirm('Cancel this scheduled job?')) return;
+    try {
+      await fetch(`${API}/api/scheduled-jobs/${jobId}`, { method: 'DELETE' });
+      fetchJobs();
+    } catch (e) { console.error(e); }
+  };
+
+  const submitJob = async () => {
+    if (!createWfId || !createCron) return;
+    try {
+      await fetch(`${API}/api/scheduled-jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow_id: createWfId, cron_expr: createCron, input_prompt: createPrompt }),
+      });
+      setIsCreating(false);
+      setCreateWfId('');
+      setCreatePrompt('');
+      fetchJobs();
+    } catch(e) { console.error(e); }
+  };
+
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-card border border-border/50 rounded-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border/30 pb-3">
+          <div className="flex items-center gap-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Clock className="w-5 h-5 text-indigo-400" />
+              Scheduled Jobs
+            </h3>
+            {!isCreating && (
+              <button 
+                onClick={() => setIsCreating(true)}
+                className="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-500/20 px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1 border border-indigo-500/20"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Job
+              </button>
+            )}
+          </div>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-muted text-muted-foreground"><X className="w-5 h-5"/></button>
+        </div>
+
+        <div className="overflow-y-auto custom-scrollbar flex-1 -mx-2 px-2 py-2">
+          {isCreating ? (
+            <div className="bg-background/50 border border-border/50 rounded-xl p-5 space-y-4">
+              <h4 className="text-sm font-semibold flex items-center gap-2 mb-2 text-indigo-400">
+                <Plus className="w-4 h-4" /> Create New Schedule
+              </h4>
+              
+              <div>
+                <label className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider block mb-1">Select Workflow</label>
+                <select
+                  value={createWfId}
+                  onChange={e => setCreateWfId(e.target.value)}
+                  className="w-full bg-card/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground outline-none"
+                >
+                  <option value="" disabled>-- Select a workflow --</option>
+                  {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider block mb-1">Cron Expression</label>
+                <input
+                  type="text"
+                  value={createCron}
+                  onChange={e => setCreateCron(e.target.value)}
+                  placeholder="0 * * * *"
+                  className="w-full bg-card/60 border border-border/40 rounded-lg px-3 py-2 text-sm font-mono text-foreground outline-none"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1.5 flex gap-3">
+                  <span><code>*/5 * * * *</code> = Every 5 mins</span>
+                  <span><code>0 * * * *</code> = Hourly</span>
+                  <span><code>0 0 * * *</code> = Daily</span>
+                </p>
+              </div>
+
+              <div>
+                <label className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider block mb-1">Initial Prompt (Optional)</label>
+                <input
+                  type="text"
+                  value={createPrompt}
+                  onChange={e => setCreatePrompt(e.target.value)}
+                  placeholder="Enter a prompt to start the run..."
+                  className="w-full bg-card/60 border border-border/40 rounded-lg px-3 py-2 text-sm text-foreground outline-none"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button onClick={() => setIsCreating(false)} className="flex-1 py-1.5 text-[11px] uppercase tracking-wider font-semibold bg-muted hover:bg-muted/80 text-foreground transition-colors rounded-lg">Cancel</button>
+                <button onClick={submitJob} disabled={!createWfId || !createCron} className="flex-[2] py-1.5 flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-wider font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors rounded-lg">
+                  <CheckCircle2 className="w-4 h-4"/> Save Job
+                </button>
+              </div>
+            </div>
+          ) : loading ? <div className="py-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div> :
+           jobs.length === 0 ? (
+             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+               <Clock className="w-10 h-10 text-muted-foreground/30 mb-3" />
+               <p className="text-sm font-medium">No active scheduled jobs.</p>
+               <p className="text-xs text-muted-foreground/70 mt-1">Click "Add Job" to automate a workflow.</p>
+               <button 
+                onClick={() => setIsCreating(true)}
+                className="mt-4 bg-indigo-600 text-white hover:bg-indigo-500 px-4 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-md shadow-indigo-900/20"
+              >
+                <Plus className="w-4 h-4" /> Add First Scheduled Job
+              </button>
+             </div>
+           ) :
+           <div className="space-y-3">
+             {jobs.map(job => {
+               const wf = workflows.find(w => w.id === job.workflow_id);
+               return (
+                 <div key={job.id} className="p-4 bg-background/50 border border-border/50 rounded-xl flex items-center gap-4 hover:border-indigo-500/30 transition-all">
+                   <div className="p-2 rounded-lg bg-indigo-500/10 hidden sm:block">
+                     <Clock className="w-4 h-4 text-indigo-400" />
+                   </div>
+                   <div className="flex-1 min-w-0">
+                     <p className="font-semibold text-sm truncate">{wf?.name || 'Unknown Workflow'} <span className="text-[10px] text-muted-foreground font-normal bg-muted px-1.5 py-0.5 rounded ml-2">ID: {job.id.slice(0,8)}</span></p>
+                     <div className="flex items-center gap-3 mt-1.5">
+                       <span className="text-[11px] text-muted-foreground font-mono bg-background px-1.5 py-0.5 rounded border border-border/40">⏱ {job.trigger_expr}</span>
+                       {job.input_prompt && <span className="text-[11px] text-muted-foreground truncate italic">"{job.input_prompt}"</span>}
+                     </div>
+                   </div>
+                   <div className="text-right flex flex-col items-end gap-2 shrink-0">
+                     <div>
+                       <p className="text-[10px] text-muted-foreground mb-0.5 uppercase tracking-wider font-medium">Next run</p>
+                       <p className="text-xs font-medium text-foreground">{job.next_run_time ? new Date(job.next_run_time).toLocaleString() : 'Pending...'}</p>
+                     </div>
+                     <button onClick={() => deleteJob(job.id)} className="text-[11px] px-2 py-1 bg-red-500/10 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded transition-colors flex items-center gap-1">
+                       <Trash2 className="w-3 h-3"/> Cancel
+                     </button>
+                   </div>
+                 </div>
+               );
+             })}
+           </div>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ──────────────────────
 export function Workflows() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [clients, setClients] = useState<Client[]>([]);
 
   // Editor state
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [steps, setSteps] = useState<WorkflowStep[]>([]);
   const [wfName, setWfName] = useState('');
   const [wfDesc, setWfDesc] = useState('');
+  const [wfClientId, setWfClientId] = useState<string>('');
   const [wfVariables, setWfVariables] = useState<WorkflowVariable[]>([]);
   const [unsaved, setUnsaved] = useState(false);
 
@@ -620,6 +845,10 @@ export function Workflows() {
   // Runs history
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [showRuns, setShowRuns] = useState(false);
+
+  // Scheduled Jobs
+  const [scheduleModal, setScheduleModal] = useState<Workflow | null>(null);
+  const [showScheduledJobs, setShowScheduledJobs] = useState(false);
 
   // ─── Fetch ──────────────────────
   const fetchWorkflows = useCallback(async () => {
@@ -646,6 +875,15 @@ export function Workflows() {
     } catch (e) { console.error(e); }
   }, []);
 
+  const fetchClients = useCallback(async () => {
+    try {
+      const data = await clientsApi.list();
+      setClients(data || []);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   const fetchRuns = useCallback(async (workflowId: string) => {
     try {
       const res = await fetch(`${API}/api/workflows/${workflowId}/runs?limit=20`);
@@ -655,7 +893,7 @@ export function Workflows() {
   }, []);
 
   useEffect(() => {
-    Promise.all([fetchWorkflows(), fetchAgents(), fetchSessions()]).finally(() => setLoading(false));
+    Promise.all([fetchWorkflows(), fetchAgents(), fetchSessions(), fetchClients()]).finally(() => setLoading(false));
   }, []);
 
   // Poll active run
@@ -709,6 +947,7 @@ export function Workflows() {
       setSteps(normalized);
       setWfName(wf.name);
       setWfDesc(wf.description);
+      setWfClientId(wf.client_id || '');
       setWfVariables(wf.variables || []);
       setWfEdges(wf.edges || []);
       setWfPositions(wf.positions || {});
@@ -722,6 +961,7 @@ export function Workflows() {
       setSteps([firstStep]);
       setWfName('New Workflow');
       setWfDesc('');
+      setWfClientId('');
       setWfVariables([]);
       setWfEdges([]);
       setWfPositions({});
@@ -824,12 +1064,22 @@ export function Workflows() {
   const saveWorkflow = async () => {
     if (!editing) return;
     try {
+      const payload = { 
+        name: wfName, 
+        description: wfDesc,
+        client_id: wfClientId || "__UNSET__",
+        steps, 
+        edges: wfEdges, 
+        positions: wfPositions, 
+        variables: wfVariables 
+      };
+      
       if (editing.id) {
         // Update
         const res = await fetch(`${API}/api/workflows/${editing.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: wfName, description: wfDesc, steps, edges: wfEdges, positions: wfPositions, variables: wfVariables }),
+          body: JSON.stringify(payload),
         });
         const updated = await res.json();
         setEditing(updated);
@@ -838,7 +1088,7 @@ export function Workflows() {
         const res = await fetch(`${API}/api/workflows`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: wfName, description: wfDesc, steps, edges: wfEdges, positions: wfPositions, variables: wfVariables }),
+          body: JSON.stringify(payload),
         });
         const created = await res.json();
         setEditing(created);
@@ -857,7 +1107,20 @@ export function Workflows() {
     } catch (e) { console.error(e); }
   };
 
-  // ─── Run ──────────────────────
+  // ─── Run & Schedule ──────────────────────
+  const createSchedule = async (cron: string, prompt: string) => {
+    if (!scheduleModal) return;
+    try {
+      await fetch(`${API}/api/scheduled-jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow_id: scheduleModal.id, cron_expr: cron, input_prompt: prompt }),
+      });
+      setScheduleModal(null);
+      // Give the backend a tiny moment to register it
+      setTimeout(() => setShowScheduledJobs(true), 200);
+    } catch(e) { console.error(e); }
+  };
   const startRun = async (input: RunInput) => {
     // Use runModal workflow (from list view) or editing workflow (from editor)
     const workflowId = runModal?.id || editing?.id;
@@ -930,6 +1193,19 @@ export function Workflows() {
                   className="text-sm text-muted-foreground bg-transparent border-none outline-none w-full mt-0.5"
                   placeholder="Add a description..."
                 />
+              </div>
+              
+              <div className="ml-4 pl-4 border-l border-border/50">
+                <select
+                  value={wfClientId}
+                  onChange={e => { setWfClientId(e.target.value); setUnsaved(true); }}
+                  className="bg-muted border border-border text-xs rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">Admin (Global Scope)</option>
+                  {clients.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -1303,6 +1579,8 @@ export function Workflows() {
   return (
     <>
     {runModal && <RunModal workflow={runModal} sessions={sessions} onRun={startRun} onClose={() => setRunModal(null)} />}
+    {scheduleModal && <ScheduleModal workflow={scheduleModal} onSchedule={createSchedule} onClose={() => setScheduleModal(null)} />}
+    {showScheduledJobs && <ScheduledJobsModal workflows={workflows} onClose={() => setShowScheduledJobs(false)} fetchSessions={fetchSessions} />}
     <div className="p-8 h-full overflow-y-auto z-10 relative custom-scrollbar">
       <div className="max-w-6xl mx-auto space-y-8">
         <div className="flex items-center justify-between">
@@ -1310,12 +1588,20 @@ export function Workflows() {
             <h1 className="text-3xl font-bold tracking-tight">Workflows</h1>
             <p className="text-muted-foreground mt-2">Build multi-agent orchestration pipelines with drag-and-drop steps.</p>
           </div>
-          <button
-            onClick={() => openEditor()}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-          >
-            <Plus className="w-4 h-4" /> Create Workflow
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowScheduledJobs(true)}
+              className="bg-card hover:bg-muted text-foreground border border-border/50 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+              <Clock className="w-4 h-4" /> Scheduled Jobs
+            </button>
+            <button
+              onClick={() => openEditor()}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+              <Plus className="w-4 h-4" /> Create Workflow
+            </button>
+          </div>
         </div>
 
         {workflows.length === 0 ? (
@@ -1354,7 +1640,20 @@ export function Workflows() {
                         {wf.description && <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{wf.description}</p>}
                       </div>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-background/50 backdrop-blur-md rounded-lg border border-border/30 p-1">
+                      {wf.client_id && (
+                        <div className="px-2 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-400 border border-purple-500/20 mr-1 flex items-center gap-1" title="Assigned to Client">
+                          <Building className="w-2.5 h-2.5" />
+                          {clients.find(c => c.id === wf.client_id)?.name || 'Client'}
+                        </div>
+                      )}
+                      <button
+                        onClick={e => { e.stopPropagation(); setScheduleModal(wf); }}
+                        className="p-1.5 rounded-md hover:bg-indigo-500/10 text-muted-foreground hover:text-indigo-400 transition-colors"
+                        title="Schedule"
+                      >
+                        <Clock className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={e => { e.stopPropagation(); setRunModal(wf); fetchSessions(); }}
                         className="p-1.5 rounded-md hover:bg-green-500/10 text-muted-foreground hover:text-green-400 transition-colors"

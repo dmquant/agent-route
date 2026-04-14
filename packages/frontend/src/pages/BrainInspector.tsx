@@ -754,7 +754,10 @@ function ActivityDesk() {
 }
 
 // ─── Main Page ──────────────────────
+import { useLanguage } from '../i18n';
+
 export function BrainInspector() {
+  const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'inspector' | 'activity'>('activity');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
@@ -835,10 +838,10 @@ export function BrainInspector() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
               <Brain className="w-8 h-8 text-indigo-400" />
-              Brain Inspector
+              {t('brain.title')}
             </h1>
             <p className="text-muted-foreground mt-1">
-              Unified middle desk — all API calls, sessions, workflows, and orchestrator status
+              {t('brain.subtitle')}
             </p>
           </div>
         </div>
@@ -854,7 +857,7 @@ export function BrainInspector() {
             }`}
           >
             <Radio className={`w-4 h-4 ${activeTab === 'activity' ? 'animate-pulse' : ''}`} />
-            Activity Desk
+            {t('brain.tab.activity')}
           </button>
           <button
             onClick={() => setActiveTab('inspector')}
@@ -865,7 +868,7 @@ export function BrainInspector() {
             }`}
           >
             <Eye className="w-4 h-4" />
-            Session Inspector
+            {t('brain.tab.inspector')}
           </button>
         </div>
 
@@ -879,9 +882,9 @@ export function BrainInspector() {
         {/* Session Selector */}
         <div className="bg-card/50 backdrop-blur-md border border-border/50 rounded-xl p-4">
           <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2 block">
-            Select Session
+            {t('brain.selectSession')}
           </label>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap max-h-[150px] overflow-y-auto pr-2 pb-2 custom-scrollbar">
             {sessions.map(s => (
               <button
                 key={s.id}
@@ -916,8 +919,8 @@ export function BrainInspector() {
               </span>
               <div className="ml-auto flex gap-2">
                 {[
-                  { action: 'wake', icon: RotateCcw, label: 'Wake', color: 'text-sky-400' },
-                  { action: 'pause', icon: Pause, label: 'Pause', color: 'text-amber-400' },
+                  { action: 'wake', icon: RotateCcw, label: t('brain.wake'), color: 'text-sky-400' },
+                  { action: 'pause', icon: Pause, label: t('brain.pause'), color: 'text-amber-400' },
                 ].map(btn => (
                   <button
                     key={btn.action}
@@ -934,7 +937,7 @@ export function BrainInspector() {
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-muted/30 border border-border/30 hover:border-border hover:bg-muted/50 transition-all"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  Refresh
+                  {t('button.refresh')}
                 </button>
               </div>
             </div>
@@ -942,11 +945,11 @@ export function BrainInspector() {
             {/* Stats Row */}
             <div className="grid grid-cols-5 gap-3">
               {[
-                { label: 'Total Events', value: brainStatus.event_summary.total_events, color: 'text-indigo-400', icon: Database },
-                { label: 'Input Tokens', value: brainStatus.token_usage.input_tokens.toLocaleString(), color: 'text-blue-400', icon: Zap },
-                { label: 'Output Tokens', value: brainStatus.token_usage.output_tokens.toLocaleString(), color: 'text-emerald-400', icon: Zap },
-                { label: 'Duration', value: `${(brainStatus.event_summary.duration_ms / 1000).toFixed(1)}s`, color: 'text-amber-400', icon: Clock },
-                { label: 'Context Load', value: `${(brainStatus.context.utilization * 100).toFixed(1)}%`, color: 'text-purple-400', icon: Gauge },
+                { label: t('brain.totalEvents'), value: brainStatus.event_summary.total_events, color: 'text-indigo-400', icon: Database },
+                { label: t('brain.inputTokens'), value: brainStatus.token_usage.input_tokens.toLocaleString(), color: 'text-blue-400', icon: Zap },
+                { label: t('brain.outputTokens'), value: brainStatus.token_usage.output_tokens.toLocaleString(), color: 'text-emerald-400', icon: Zap },
+                { label: t('brain.duration'), value: `${(brainStatus.event_summary.duration_ms / 1000).toFixed(1)}s`, color: 'text-amber-400', icon: Clock },
+                { label: t('brain.contextLoad'), value: `${(brainStatus.context.utilization * 100).toFixed(1)}%`, color: 'text-purple-400', icon: Gauge },
               ].map(stat => (
                 <div key={stat.label} className="bg-card/30 backdrop-blur-md border border-border/30 rounded-xl p-3">
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
@@ -965,7 +968,7 @@ export function BrainInspector() {
                 <div className="flex items-center justify-between px-5 py-4 border-b border-border/30">
                   <div className="flex items-center gap-2">
                     <Eye className="w-5 h-5 text-indigo-400" />
-                    <h3 className="font-semibold">Event Log</h3>
+                    <h3 className="font-semibold">{t('brain.eventLog')}</h3>
                     <span className="text-xs text-muted-foreground">({filteredEvents.length} events)</span>
                   </div>
 

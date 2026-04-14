@@ -1,7 +1,16 @@
 // ─── Types ──────────────────────────────────────────────────
 
+export interface Client {
+  id: string;
+  name: string;
+  api_key: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Project {
   id: string;
+  client_id: string | null;
   name: string;
   description: string;
   color: string;
@@ -34,15 +43,29 @@ export interface Message {
 // ─── API Client ─────────────────────────────────────────────
 
 const API_BASE = 'http://localhost:8000';
+const ADMIN_API_KEY = 'sk_admin_route_2025';
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
+  const headers = new Headers(opts?.headers);
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (!headers.has('X-API-Key')) headers.set('X-API-Key', ADMIN_API_KEY);
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...opts,
+    headers,
   });
   if (!res.ok) throw new Error(`API Error ${res.status}: ${await res.text()}`);
   return res.json();
 }
+
+// Clients
+export const clientsApi = {
+  list: () => apiFetch<{ clients: Client[] }>('/api/clients').then(r => r.clients),
+  create: (data: { name: string }) =>
+    apiFetch<{ client: Client }>('/api/clients', { method: 'POST', body: JSON.stringify(data) }).then(r => r.client),
+  delete: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/clients/${id}`, { method: 'DELETE' }),
+};
 
 // Projects
 export const projectsApi = {

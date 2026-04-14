@@ -43,5 +43,4 @@ test_mflux.py
 .gitignore
 
 .temp/
-docs/
 vibelog/

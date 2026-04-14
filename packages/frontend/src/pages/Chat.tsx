@@ -424,7 +424,7 @@ export function Chat() {
   }, [addLog]);
 
   const ws = useWebSocket({
-    url: 'ws://localhost:8000/ws/agent',
+    url: 'ws://localhost:8000/ws/agent?api_key=sk_admin_route_2025',
     onMessage: handleWsMessage,
     onStateChange: handleWsStateChange,
     maxReconnectDelay: 30000,

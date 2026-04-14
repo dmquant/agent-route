@@ -27,13 +27,18 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _ts_range(date_str: Optional[str] = None, days: int = 1):
-    """Return (start_epoch_s, end_epoch_s) for the given date or today."""
+    """Return (start_epoch_s, end_epoch_s) backwards from the given date or today."""
     if date_str:
         day = datetime.strptime(date_str, "%Y-%m-%d")
     else:
         day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    start = day.timestamp()
-    end = (day + timedelta(days=days)).timestamp()
+        
+    if days >= 1:
+        start = (day - timedelta(days=days - 1)).timestamp()
+    else:
+        start = day.timestamp()
+        
+    end = (day + timedelta(days=1)).timestamp()
     return start, end
 
 

@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), '.env')
 load_dotenv(dotenv_path=env_path)
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
@@ -39,9 +39,11 @@ from app.workflow_store import (
     update_workflow, delete_workflow, create_run, update_run, get_run, list_runs,
 )
 from app.workflow_executor import workflow_executor
+from app.scheduler import start_scheduler, add_cron_job, list_jobs, remove_job
 from app.session_store import (
     init_session_db,
-    create_project, list_projects, update_project, delete_project,
+    create_project, list_projects, update_project, delete_project, get_client_by_api_key,
+    create_client, list_clients, delete_client,
     create_session, list_sessions, get_session, update_session, delete_session,
     add_message, get_messages, get_messages_with_images, auto_title_session,
     get_session_workspace,
@@ -62,6 +64,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Auth Dependency ──────────────────────────────────────────
+
+async def get_current_client(x_api_key: Optional[str] = Header(None)) -> Optional[Dict]:
+    """
+    X-API-Key is strictly required. 
+    If it matches ADMIN_API_KEY, it returns None, giving full admin access explicitly.
+    Otherwise we validate it against clients table.
+    """
+    admin_key = os.getenv("ADMIN_API_KEY", "sk_admin_route_2025")
+    
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API Key is required")
+    
+    if x_api_key == admin_key:
+        return None  # Admin explicit full access
+        
+    client = get_client_by_api_key(x_api_key)
+    if not client:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    return client
 
 # ─── API Call Logging Middleware ──────────────────────────────
 # Records every HTTP request for the unified activity feed.
@@ -142,24 +165,31 @@ class ExecutionResponse(BaseModel):
 
 # ─── Pydantic models for session/project API ────────────────
 
+class ClientCreate(BaseModel):
+    name: str
+
 class ProjectCreate(BaseModel):
     name: str
     description: str = ''
     color: str = '#6366f1'
+    client_id: Optional[str] = None
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     color: Optional[str] = None
+    client_id: Optional[str] = None
 
 class SessionCreate(BaseModel):
     project_id: Optional[str] = None
     title: str = 'New Session'
     agent_type: str = 'gemini'
+    client_id: Optional[str] = None
 
 class SessionUpdate(BaseModel):
     title: Optional[str] = None
     project_id: Optional[str] = None
+    client_id: Optional[str] = None
 
 
 # ---------------------------------------------
@@ -177,6 +207,7 @@ async def startup_event():
     # Register all execution hands (Managed Agents Phase 1)
     auto_register_all()
     print(f"[Startup] Hand Registry: {hand_registry.list_names()}")
+    start_scheduler()
     # Start periodic GC for completed tasks
     await task_manager.start_gc_loop(interval_seconds=60, max_age_ms=300000)
 
@@ -214,18 +245,34 @@ async def get_ollama_models():
 # 2. PROJECT & SESSION CRUD API
 # ---------------------------------------------
 
+@app.get("/api/clients")
+def api_list_clients():
+    return {"clients": list_clients()}
+
+@app.post("/api/clients")
+def api_create_client(body: ClientCreate):
+    client = create_client(name=body.name)
+    return {"client": client}
+
+@app.delete("/api/clients/{client_id}")
+def api_delete_client(client_id: str):
+    delete_client(client_id)
+    return {"ok": True}
+
 @app.get("/api/projects")
 def api_list_projects():
     return {"projects": list_projects()}
 
 @app.post("/api/projects")
-def api_create_project(body: ProjectCreate):
-    project = create_project(name=body.name, description=body.description, color=body.color)
+def api_create_project(body: ProjectCreate, current_client: Optional[Dict] = Depends(get_current_client)):
+    # Standard clients implicitly own their creations. Admin skips this to explicitly assign.
+    cid = current_client["id"] if current_client else body.client_id
+    project = create_project(name=body.name, description=body.description, color=body.color, client_id=cid)
     return {"project": project}
 
 @app.put("/api/projects/{project_id}")
 def api_update_project(project_id: str, body: ProjectUpdate):
-    project = update_project(project_id, name=body.name, description=body.description, color=body.color)
+    project = update_project(project_id, name=body.name, description=body.description, color=body.color, client_id=body.client_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"project": project}
@@ -236,34 +283,57 @@ def api_delete_project(project_id: str):
     return {"ok": True}
 
 @app.get("/api/sessions")
-def api_list_sessions(project_id: Optional[str] = None):
-    return {"sessions": list_sessions(project_id=project_id)}
+def api_list_sessions(project_id: Optional[str] = None, current_client: Optional[Dict] = Depends(get_current_client)):
+    cid = current_client["id"] if current_client else None
+    return {"sessions": list_sessions(project_id=project_id, client_id=cid)}
 
 @app.post("/api/sessions")
-def api_create_session(body: SessionCreate):
-    session = create_session(project_id=body.project_id, title=body.title, agent_type=body.agent_type)
+def api_create_session(body: SessionCreate, current_client: Optional[Dict] = Depends(get_current_client)):
+    # Standard clients implicitly own their creations. Admin skips this to explicitly assign.
+    cid = current_client["id"] if current_client else body.client_id
+    session = create_session(project_id=body.project_id, client_id=cid, title=body.title, agent_type=body.agent_type)
     return {"session": session}
 
 @app.get("/api/sessions/{session_id}")
-def api_get_session(session_id: str):
+def api_get_session(session_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    cid = current_client["id"] if current_client else None
+    if cid and session.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
     return {"session": session}
 
 @app.put("/api/sessions/{session_id}")
-def api_update_session(session_id: str, body: SessionUpdate):
-    # Handle special sentinel for project_id removal
+def api_update_session(session_id: str, body: SessionUpdate, current_client: Optional[Dict] = Depends(get_current_client)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    cid = current_client["id"] if current_client else None
+    if cid and session.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
     proj_id = '__UNSET__'
     if body.project_id is not None:
         proj_id = body.project_id if body.project_id != '' else None
-    session = update_session(session_id, title=body.title, project_id=proj_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        
+    c_id = '__UNSET__'
+    if body.client_id is not None:
+        c_id = body.client_id if body.client_id != '' else None
+    
+    session = update_session(session_id, title=body.title, project_id=proj_id, client_id=c_id)
     return {"session": session}
 
 @app.delete("/api/sessions/{session_id}")
-def api_delete_session(session_id: str):
+def api_delete_session(session_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    cid = current_client["id"] if current_client else None
+    if cid and session.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
     delete_session(session_id)
     return {"ok": True}
 
@@ -786,6 +856,7 @@ class WorkflowCreateRequest(BaseModel):
     variables: list = []  # [{name, label, type, default, required}]
     edges: list = []      # DAG edges [{id, source, sourceHandle, target, targetHandle, condition?}]
     positions: dict = {}  # Node positions {step_id: {x, y}}
+    client_id: Optional[str] = None
 
 
 class WorkflowUpdateRequest(BaseModel):
@@ -796,6 +867,7 @@ class WorkflowUpdateRequest(BaseModel):
     variables: Optional[list] = None
     edges: Optional[list] = None
     positions: Optional[dict] = None
+    client_id: Optional[str] = None
 
 
 class WorkflowInputFile(BaseModel):
@@ -812,16 +884,27 @@ class WorkflowRunRequest(BaseModel):
     variables: Optional[Dict[str, str]] = None  # Variable values: {"TICKER": "AAPL", "DATE": "2026-04-12"}
 
 
+class ScheduleJobRequest(BaseModel):
+    workflow_id: str
+    cron_expr: str
+    input_prompt: Optional[str] = None
+
+
 @app.get("/api/workflows")
-def api_list_workflows():
-    return {"workflows": list_workflows()}
+def api_list_workflows(current_client: Optional[Dict] = Depends(get_current_client)):
+    cid = current_client["id"] if current_client else None
+    return {"workflows": list_workflows(client_id=cid)}
 
 
 @app.post("/api/workflows")
-def api_create_workflow(req: WorkflowCreateRequest):
+def api_create_workflow(req: WorkflowCreateRequest, current_client: Optional[Dict] = Depends(get_current_client)):
+    # Standard clients implicitly own their creations. Admin skips this to explicitly assign.
+    cid = current_client["id"] if current_client else req.client_id
     wf = create_workflow(
         name=req.name,
         description=req.description,
+        project_id=None,
+        client_id=cid,
         steps=req.steps,
         config=req.config,
         variables=req.variables,
@@ -832,16 +915,26 @@ def api_create_workflow(req: WorkflowCreateRequest):
 
 
 @app.get("/api/workflows/{workflow_id}")
-def api_get_workflow(workflow_id: str):
+def api_get_workflow(workflow_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
     wf = get_workflow(workflow_id)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    cid = current_client["id"] if current_client else None
+    if cid and wf.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
     return wf
 
 
 @app.put("/api/workflows/{workflow_id}")
-def api_update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
-    wf = update_workflow(
+def api_update_workflow(workflow_id: str, req: WorkflowUpdateRequest, current_client: Optional[Dict] = Depends(get_current_client)):
+    wf = get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    cid = current_client["id"] if current_client else None
+    if cid and wf.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    updated = update_workflow(
         workflow_id,
         name=req.name,
         description=req.description,
@@ -850,22 +943,70 @@ def api_update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
         variables=req.variables,
         edges=req.edges,
         positions=req.positions,
+        client_id=req.client_id,
     )
-    if not wf:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    return wf
+    return updated
 
 
 @app.delete("/api/workflows/{workflow_id}")
-def api_delete_workflow(workflow_id: str):
-    success = delete_workflow(workflow_id)
-    if not success:
+def api_delete_workflow(workflow_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
+    wf = get_workflow(workflow_id)
+    if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
-    return {"deleted": True}
+    cid = current_client["id"] if current_client else None
+    if cid and wf.get("client_id") != cid:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    success = delete_workflow(workflow_id)
+    return {"deleted": success}
+
+# ─── Scheduled Jobs ───
+# ─── Scheduled Jobs ───
+@app.get("/api/scheduled-jobs")
+async def api_list_scheduled_jobs(current_client: Optional[Dict] = Depends(get_current_client)):
+    jobs = list_jobs()
+    pid = current_client["id"] if current_client else None
+    if pid:
+        filtered = []
+        for j in jobs:
+            wf = get_workflow(j["workflow_id"])
+            if wf and wf.get("project_id") == pid:
+                filtered.append(j)
+        return {"jobs": filtered}
+    return {"jobs": jobs}
+
+@app.post("/api/scheduled-jobs")
+async def api_create_scheduled_job(req: ScheduleJobRequest, current_client: Optional[Dict] = Depends(get_current_client)):
+    wf = get_workflow(req.workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    pid = current_client["id"] if current_client else None
+    if pid and wf.get("project_id") != pid:
+        raise HTTPException(403, "Access denied")
+    try:
+        job_id = add_cron_job(req.workflow_id, req.cron_expr, req.input_prompt)
+        return {"job_id": job_id, "status": "success"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/scheduled-jobs/{job_id}")
+async def api_delete_scheduled_job(job_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
+    jobs = list_jobs()
+    job = next((j for j in jobs if j["id"] == job_id), None)
+    if job:
+        wf = get_workflow(job["workflow_id"])
+        pid = current_client["id"] if current_client else None
+        if pid and wf and wf.get("project_id") != pid:
+            raise HTTPException(403, "Access denied")
+    try:
+        remove_job(job_id)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/api/workflows/{workflow_id}/run")
-async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
+async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest, current_client: Optional[Dict] = Depends(get_current_client)):
     """Start a workflow execution. Creates or reuses a session.
 
     Accepts optional input_prompt (injected into first step) and
@@ -874,15 +1015,21 @@ async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
     wf = get_workflow(workflow_id)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+        
+    pid = current_client["id"] if current_client else None
+    if pid and wf.get("project_id") != pid:
+        raise HTTPException(403, "Access denied")
 
     if req.session_id:
         session = get_session(req.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        if pid and session.get("project_id") != pid:
+            raise HTTPException(status_code=403, detail="Session access denied")
         session_id = req.session_id
     else:
         title = req.session_title or f"Workflow: {wf['name']}"
-        session = create_session(title=title, agent_type="workflow")
+        session = create_session(project_id=pid, title=title, agent_type="workflow")
         session_id = session["id"]
 
     # Write input files to workspace before execution
@@ -912,20 +1059,39 @@ async def api_run_workflow(workflow_id: str, req: WorkflowRunRequest):
 
 
 @app.get("/api/workflows/{workflow_id}/runs")
-def api_list_workflow_runs(workflow_id: str, limit: int = 50):
+def api_list_workflow_runs(workflow_id: str, limit: int = 50, current_client: Optional[Dict] = Depends(get_current_client)):
+    wf = get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    pid = current_client["id"] if current_client else None
+    if pid and wf.get("project_id") != pid:
+        raise HTTPException(403, "Access denied")
     return {"runs": list_runs(workflow_id=workflow_id, limit=limit)}
 
 
 @app.get("/api/workflow-runs/{run_id}")
-def api_get_run(run_id: str):
+def api_get_run(run_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    pid = current_client["id"] if current_client else None
+    if pid:
+        wf = get_workflow(run["workflow_id"])
+        if wf and wf.get("project_id") != pid:
+            raise HTTPException(403, "Access denied")
     return run
 
 
 @app.post("/api/workflow-runs/{run_id}/cancel")
-def api_cancel_run(run_id: str):
+def api_cancel_run(run_id: str, current_client: Optional[Dict] = Depends(get_current_client)):
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    pid = current_client["id"] if current_client else None
+    if pid:
+        wf = get_workflow(run["workflow_id"])
+        if wf and wf.get("project_id") != pid:
+            raise HTTPException(403, "Access denied")
     success = workflow_executor.cancel_run(run_id)
     if not success:
         raise HTTPException(status_code=400, detail="Run not running or not found")
@@ -1142,14 +1308,20 @@ def api_list_session_files(session_id: str):
     workspace = get_session_workspace(session_id)
     files = []
     if os.path.isdir(workspace):
-        for entry in os.listdir(workspace):
-            full = os.path.join(workspace, entry)
-            if os.path.isfile(full):
-                files.append({
-                    "name": entry,
-                    "size": os.path.getsize(full),
-                    "path": full,
-                })
+        for root, dirs, filenames in os.walk(workspace):
+            # Exclude hidden directories like .git
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for entry in filenames:
+                if entry.startswith('.'):
+                    continue
+                full = os.path.join(root, entry)
+                if os.path.isfile(full):
+                    rel_path = os.path.relpath(full, workspace)
+                    files.append({
+                        "name": rel_path,
+                        "size": os.path.getsize(full),
+                        "path": full,
+                    })
     return {"files": files, "workspace": workspace}
 
 
@@ -1177,7 +1349,8 @@ async def execute_task(req: ExecutionRequest, request: Request):
     """
     _check_env_gate(req.client)
 
-    hand = hand_registry.get(req.client)
+    # Get available hand with fallback logic
+    hand = hand_registry.get_available(req.client, backups=["gemini", "claude", "codex"])
     if not hand:
         raise HTTPException(status_code=404, detail=f"No hand registered for '{req.client}'")
 
@@ -1202,6 +1375,14 @@ async def execute_task(req: ExecutionRequest, request: Request):
 
     result = await hand.execute(req.prompt, workspace_dir=workspace_dir, **target_opt_kwargs)
 
+    # Check for rate limit
+    from app.hands.base import check_rate_limit
+    wait_time = check_rate_limit(result.output)
+    if wait_time is not None:
+        hand_registry.mark_rate_limited(hand.name, wait_time)
+        result.exit_code = 429
+        result.output = f"[RATE LIMITED] {hand.name} is paused for {wait_time}s. Original Output:\n{result.output}"
+
     # ─── Record result into session ─────
     if session_id:
         add_message(session_id, source="agent", content=result.output, agent_type=req.client)
@@ -1224,7 +1405,8 @@ async def execute_task_stream(req: ExecutionRequest, request: Request):
     """
     _check_env_gate(req.client)
 
-    hand = hand_registry.get(req.client)
+    # Get available hand with fallback
+    hand = hand_registry.get_available(req.client, backups=["gemini", "claude", "codex"])
     if not hand:
         raise HTTPException(status_code=404, detail=f"No hand registered for '{req.client}'")
 
@@ -1259,9 +1441,19 @@ async def execute_task_stream(req: ExecutionRequest, request: Request):
             result = await hand.execute(req.prompt, workspace_dir=workspace_dir, on_log=stream_log, **target_opt_kwargs)
             if result.image_b64:
                 await q.put({"type": "node_execution_image", "b64": result.image_b64})
+            # Check for rate limit
+            from app.hands.base import check_rate_limit
+            output_text = "".join(full_output)
+            wait_time = check_rate_limit(output_text)
+            if wait_time is not None:
+                hand_registry.mark_rate_limited(hand.name, wait_time)
+                result.exit_code = 429
+                rate_str = f"\n\n[RATE LIMITED] {hand.name} is paused for {wait_time}s.\n"
+                output_text += rate_str
+                await q.put({"type": "node_execution_log", "log": rate_str})
+
             # Record result into session
             if session_id:
-                output_text = "".join(full_output)
                 add_message(session_id, source="agent", content=output_text, agent_type=req.client, image_b64=result.image_b64)
                 evt_type = EventType.TOOL_RESULT if result.success else EventType.TOOL_ERROR
                 session_events.emit_event(session_id, evt_type, content=output_text[:2000], agent=req.client,
@@ -1484,6 +1676,20 @@ async def websocket_endpoint(websocket: WebSocket):
     - Rich status phases: connecting → executing → streaming → finalizing
     - All events are broadcast to the WebSocket regardless of viewed session
     """
+    x_api_key = websocket.query_params.get("api_key")
+    admin_key = os.getenv("ADMIN_API_KEY", "sk_admin_route_2025")
+    
+    if not x_api_key:
+        await websocket.close(code=1008, reason="API Key is required")
+        return
+        
+    current_client = None
+    if x_api_key != admin_key:
+        current_client = get_client_by_api_key(x_api_key)
+        if not current_client:
+            await websocket.close(code=1008, reason="Invalid API Key")
+            return
+
     await websocket.accept()
     print("Client natively connected to Python FastAPI WebSocket.")
 
@@ -1508,6 +1714,13 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
+            
+            _session_id = data.get("sessionId")
+            if current_client and _session_id:
+                sess = get_session(_session_id)
+                if sess and sess.get("client_id") != current_client["id"]:
+                    await websocket.send_json({"type": "error", "message": "Access denied for this session"})
+                    continue
 
             # ─── Handle status query ─────
             if data.get("type") == "query_running":

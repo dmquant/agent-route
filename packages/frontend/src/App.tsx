@@ -6,6 +6,7 @@ import { Workflows } from './pages/Workflows';
 import { Routines } from './pages/Routines';
 import { Chat } from './pages/Chat';
 import { BrainInspector } from './pages/BrainInspector';
+import { Clients } from './pages/Clients';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/workflows" element={<Workflows />} />
           <Route path="/routines" element={<Routines />} />
           <Route path="/chat" element={<Chat />} />
+          <Route path="/clients" element={<Clients />} />
         </Routes>
       </main>
     </div>

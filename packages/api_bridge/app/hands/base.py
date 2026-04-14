@@ -140,6 +140,24 @@ def filter_noise(text: str) -> str:
     return result
 
 
+def check_rate_limit(output: str) -> Optional[int]:
+    """Parse agent output text for rate limit errors and extract wait time in seconds."""
+    if not output: return None
+    lower_out = output.lower()
+    
+    if "429 too many requests" not in lower_out and "rate limit" not in lower_out and "quota" not in lower_out:
+        return None
+        
+    sec_match = re.search(r"try again in (\d+)(?:\s*)s", lower_out)
+    if sec_match: return int(sec_match.group(1))
+    
+    min_match = re.search(r"try again in (\d+)(?:\s*)m", lower_out)
+    if min_match: return int(min_match.group(1)) * 60
+        
+    return 3600  # default 1 hour backoff
+
+
+
 @dataclass
 class HandResult:
     """Universal result from any hand execution."""
