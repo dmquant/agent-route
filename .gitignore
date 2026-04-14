@@ -23,6 +23,10 @@ packages/workspaces/
 *.sqlite
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.backup
 packages/backend/d1/
 
 # Monorepo Caches
