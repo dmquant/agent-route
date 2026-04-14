@@ -26,6 +26,7 @@ packages/workspaces/
 *.db-wal
 *.db-shm
 *.db-journal
+sessions.db-wal
 *.backup
 packages/backend/d1/
 
@@ -48,3 +49,4 @@ test_mflux.py
 
 .temp/
 vibelog/
+packages/api_bridge/app/sessions.db-wal
